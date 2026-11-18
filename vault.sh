@@ -10,6 +10,7 @@
 # Saved in R2 (bucket $R2_BUCKET):
 #   comfyui/models        comfyui/custom_nodes   comfyui/user (workflows+settings)
 #   comfyui/input         comfyui/output (backup only, not restored by default)
+#   comfyui/jupyter       JupyterLab settings + layouts
 #   trash/<date>/...      files you deleted locally (kept, never lost)
 #
 # Needs Vast account env vars: R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET
@@ -131,6 +132,14 @@ cmd_backup() {
             rc copy "$COMFY/$d" "$REMOTE/$d"
         fi
     done
+    if [ -d "$WORKSPACE/.jupyter" ]; then
+        log "Backing up Jupyter settings"
+        if [ -f "$MARKER" ]; then
+            rc sync "$WORKSPACE/.jupyter" "$REMOTE/jupyter" --backup-dir "$TRASH/$stamp/jupyter"
+        else
+            rc copy "$WORKSPACE/.jupyter" "$REMOTE/jupyter"
+        fi
+    fi
     for d in $KEEP_DIRS; do
         [ -d "$COMFY/$d" ] || continue
         log "Backing up $d (never deleted in R2)"
@@ -161,6 +170,15 @@ install_node_requirements() {
     done
 }
 
+restore_dir() {   # remote-subdir local-dir   (skips if nothing in R2)
+    mkdir -p "$2"
+    if "$RCLONE" lsf "$REMOTE/$1" --max-depth 1 2>/dev/null | head -1 | grep -q .; then
+        rc copy "$REMOTE/$1" "$2"
+    else
+        log "  (nothing in R2 for $1)"
+    fi
+}
+
 cmd_restore() {
     ensure_rclone; load_env; need_comfy; take_lock
     local d
@@ -174,16 +192,18 @@ cmd_restore() {
     "$RCLONE" cat "$REMOTE/.last_backup" 2>/dev/null | sed 's/^/Last backup: /' | tee -a "$LOG" || true
     for d in $MIRROR_DIRS; do
         log "Restoring $d"
-        mkdir -p "$COMFY/$d"
-        rc copy "$REMOTE/$d" "$COMFY/$d"
+        restore_dir "$d" "$COMFY/$d"
     done
+    log "Restoring Jupyter settings"
+    restore_dir jupyter "$WORKSPACE/.jupyter"
     if [ "$RESTORE_OUTPUT" = "1" ]; then
         log "Restoring output"
-        rc copy "$REMOTE/output" "$COMFY/output"
+        restore_dir output "$COMFY/output"
     fi
     install_node_requirements
     touch "$MARKER"
     restart_comfyui
+    if supervisorctl status labvault >/dev/null 2>&1; then supervisorctl restart labvault >/dev/null || true; fi
     log "===== RESTORE COMPLETE ====="
 }
 
