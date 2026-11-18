@@ -40,16 +40,20 @@ die()  { log "ERROR: $*"; exit 1; }
 trap 'log "ERROR: vault ${CMD:-} failed (line $LINENO). See $LOG"' ERR
 
 # -----------------------------------------------------------------------------
+# Use our own up-to-date rclone (old distro builds fail on R2 with "501 Not Implemented")
+RCLONE="/opt/vault/rclone"
 ensure_rclone() {
-    command -v rclone >/dev/null 2>&1 && return 0
-    log "Installing rclone..."
+    mkdir -p /root/.config/rclone && touch /root/.config/rclone/rclone.conf
+    if [ -x "$RCLONE" ]; then return 0; fi
+    log "Installing latest rclone..."
     if ! command -v unzip >/dev/null 2>&1; then
         apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip </dev/null
     fi
     local tmp; tmp=$(mktemp -d)
     curl -fsSL -o "$tmp/rclone.zip" https://downloads.rclone.org/rclone-current-linux-amd64.zip
     unzip -q "$tmp/rclone.zip" -d "$tmp"
-    install -m 755 "$tmp"/rclone-*-linux-amd64/rclone /usr/local/bin/rclone
+    mkdir -p /opt/vault
+    install -m 755 "$tmp"/rclone-*-linux-amd64/rclone "$RCLONE"
     rm -rf "$tmp"
 }
 
@@ -81,7 +85,7 @@ take_lock() {
 
 need_comfy() { [ -d "$COMFY" ] || die "ComfyUI not found at $COMFY - run install_comfyui.sh first"; }
 
-rc() { rclone "$@" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" 2>&1 | tee -a "$LOG"; }
+rc() { "$RCLONE" "$@" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" 2>&1 | tee -a "$LOG"; }
 
 restart_comfyui() {
     if supervisorctl status comfyui >/dev/null 2>&1; then
@@ -95,14 +99,15 @@ restart_comfyui() {
 # -----------------------------------------------------------------------------
 cmd_setup() {
     ensure_rclone
-    rclone version | head -1
+    "$RCLONE" version | head -1
     load_env
     log "Testing R2 bucket '$R2_BUCKET' (read + write)..."
-    rclone lsf "r2:$R2_BUCKET" --max-depth 1 >/dev/null \
+    "$RCLONE" lsf "r2:$R2_BUCKET" --max-depth 1 >/dev/null \
         || die "Cannot read the R2 bucket. Check R2_ENDPOINT, keys, and bucket name."
-    echo "test $(date)" | rclone rcat "$REMOTE/.vault_test" \
+    echo "test $(date)" > /tmp/.vault_test
+    "$RCLONE" copyto /tmp/.vault_test "$REMOTE/.vault_test" \
         || die "Cannot write to the R2 bucket. The API token needs 'Object Read & Write'."
-    rclone deletefile "$REMOTE/.vault_test"
+    "$RCLONE" deletefile "$REMOTE/.vault_test"
     if [ "$(readlink -f "$0")" != "/usr/local/bin/vault" ]; then
         install -m 755 "$0" /usr/local/bin/vault
     fi
@@ -132,8 +137,8 @@ cmd_backup() {
         rc copy "$COMFY/$d" "$REMOTE/$d"
     done
     local gpu; gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
-    echo "$(date '+%F %T %Z') instance=${CONTAINER_ID:-?} gpu=${gpu:-?}" | rclone rcat "$REMOTE/.last_backup"
-    date '+%F %T' > "$WORKSPACE/.vault_last_backup"
+    echo "$(date '+%F %T %Z') instance=${CONTAINER_ID:-?} gpu=${gpu:-?}" > "$WORKSPACE/.vault_last_backup"
+    "$RCLONE" copyto "$WORKSPACE/.vault_last_backup" "$REMOTE/.last_backup"
     log "===== BACKUP COMPLETE ====="
 }
 
@@ -160,13 +165,13 @@ cmd_restore() {
     ensure_rclone; load_env; need_comfy; take_lock
     local d
     log "===== RESTORE started ====="
-    if [ -z "$(rclone lsf "$REMOTE" --max-depth 1 2>/dev/null | head -1 || true)" ]; then
+    if [ -z "$("$RCLONE" lsf "$REMOTE" --max-depth 1 2>/dev/null | head -1 || true)" ]; then
         log "R2 has no backup yet (first run) - nothing to restore"
         touch "$MARKER"
         log "===== RESTORE COMPLETE (nothing to restore) ====="
         return 0
     fi
-    rclone cat "$REMOTE/.last_backup" 2>/dev/null | sed 's/^/Last backup: /' | tee -a "$LOG" || true
+    "$RCLONE" cat "$REMOTE/.last_backup" 2>/dev/null | sed 's/^/Last backup: /' | tee -a "$LOG" || true
     for d in $MIRROR_DIRS; do
         log "Restoring $d"
         mkdir -p "$COMFY/$d"
@@ -194,10 +199,10 @@ cmd_status() {
     echo "---- R2 bucket $R2_BUCKET ----"
     for d in $MIRROR_DIRS $KEEP_DIRS; do
         printf "  %-13s " "$d"
-        rclone size "$REMOTE/$d" --fast-list 2>/dev/null | grep "Total size" | sed 's/Total size: //' || echo "-"
+        "$RCLONE" size "$REMOTE/$d" --fast-list 2>/dev/null | grep "Total size" | sed 's/Total size: //' || echo "-"
     done
     echo "---- Info ----"
-    echo "  Last backup (R2):       $(rclone cat "$REMOTE/.last_backup" 2>/dev/null || echo never)"
+    echo "  Last backup (R2):       $("$RCLONE" cat "$REMOTE/.last_backup" 2>/dev/null || echo never)"
     echo "  Restored on this instance: $([ -f "$MARKER" ] && echo yes || echo no)"
     df -h "$WORKSPACE" | awk 'NR==2 {print "  Disk: " $3 " used of " $2 " (" $4 " free)"}'
 }
