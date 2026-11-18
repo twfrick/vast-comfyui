@@ -67,7 +67,13 @@ else
     "$CLOUDFLARED" --version
     cat > /opt/supervisor-scripts/cftunnel.sh <<'EOF'
 #!/bin/bash
-TOKEN="${CF_TUNNEL_TOKEN:-$(grep -m1 '^CF_TUNNEL_TOKEN=' /etc/environment | cut -d= -f2- | sed 's/^"//; s/"$//')}"
+# Token: /opt/vault/cf_token (manual override) > CF_TUNNEL_TOKEN env > /etc/environment
+if [ -s /opt/vault/cf_token ]; then
+    TOKEN=$(cat /opt/vault/cf_token)
+else
+    TOKEN="${CF_TUNNEL_TOKEN:-$(grep -m1 '^CF_TUNNEL_TOKEN=' /etc/environment | cut -d= -f2- | sed 's/^"//; s/"$//')}"
+fi
+TOKEN=$(printf '%s' "$TOKEN" | tr -d " \r\n\"'")
 exec /opt/vault/cloudflared tunnel --no-autoupdate run --token "$TOKEN"
 EOF
     chmod +x /opt/supervisor-scripts/cftunnel.sh
