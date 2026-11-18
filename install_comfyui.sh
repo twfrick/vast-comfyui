@@ -111,6 +111,8 @@ cat > /opt/supervisor-scripts/comfyui.sh <<EOF
 #!/bin/bash
 # Started by supervisor. Extra ComfyUI options can be set in the COMFYUI_ARGS env var.
 source $VENV/bin/activate
+# Legacy Manager UI = "Manager" button with Model Manager (downloads models to the server)
+export ENABLE_LEGACY_COMFYUI_MANAGER_FRONT=true
 cd $COMFY_DIR
 exec python main.py --listen 127.0.0.1 --port $COMFY_PORT $MANAGER_FLAGS \${COMFYUI_ARGS:-}
 EOF
