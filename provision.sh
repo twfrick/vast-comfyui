@@ -14,7 +14,7 @@ set -Eeuo pipefail
 REPO="${VAULT_REPO:-twfrick/vast-comfyui}"   # GitHub user/repo with the scripts
 BRANCH="${VAULT_BRANCH:-main}"
 DEST="/opt/vault"
-FILES="install_comfyui.sh vault.sh"
+FILES="install_comfyui.sh vault.sh cftunnel.sh"
 
 mkdir -p "$DEST" /workspace/logs
 exec > >(tee -a /workspace/logs/provision.log) 2>&1
@@ -23,7 +23,7 @@ echo "===== PROVISION started $(date) ====="
 
 # Load account env vars if the provisioner didn't pass them through
 if [ -z "${R2_BUCKET:-}" ] && [ -f /etc/environment ]; then
-    for k in HF_TOKEN CIVITAI_TOKEN GITHUB_TOKEN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
+    for k in HF_TOKEN CIVITAI_TOKEN GITHUB_TOKEN CF_TUNNEL_TOKEN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
         v=$(grep -m1 "^$k=" /etc/environment | cut -d= -f2- | sed 's/^"//; s/"$//' || true)
         [ -n "$v" ] && export "$k=$v"
     done
@@ -48,5 +48,8 @@ bash "$DEST/install_comfyui.sh"
 echo; echo "===== Restoring vault from R2 ====="
 bash "$DEST/vault.sh" setup
 vault restore
+
+echo; echo "===== Cloudflare Tunnel + JupyterLab ====="
+bash "$DEST/cftunnel.sh" || echo "WARNING: tunnel setup had problems - see /workspace/logs/cftunnel_setup.log"
 
 echo; echo "===== PROVISION COMPLETE $(date) ====="
