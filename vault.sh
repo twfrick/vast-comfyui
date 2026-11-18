@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# =============================================================================
+# vault.sh  -  Back up / restore ComfyUI to Cloudflare R2
+#
+#   vault setup     install rclone, test R2, install the "vault" command
+#   vault backup    copy models, custom_nodes, workflows, input, output -> R2
+#   vault restore   copy everything back from R2 + reinstall node requirements
+#   vault status    show local vs R2 sizes and last backup time
+#
+# Saved in R2 (bucket $R2_BUCKET):
+#   comfyui/models        comfyui/custom_nodes   comfyui/user (workflows+settings)
+#   comfyui/input         comfyui/output (backup only, not restored by default)
+#   trash/<date>/...      files you deleted locally (kept, never lost)
+#
+# Needs Vast account env vars: R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET
+# Log: /workspace/logs/vault.log
+# =============================================================================
+set -Eeuo pipefail
+
+WORKSPACE="${WORKSPACE:-/workspace}"
+COMFY="$WORKSPACE/ComfyUI"
+LOG_DIR="$WORKSPACE/logs"
+LOG="$LOG_DIR/vault.log"
+MARKER="$WORKSPACE/.vault_restored"     # exists = safe to mirror deletions to R2
+CONSTRAINTS="$WORKSPACE/.torch-constraints.txt"
+PY="/venv/main/bin/python"
+
+MIRROR_DIRS="models custom_nodes user input"   # backed up AND restored
+KEEP_DIRS="output"                             # backed up only, never deleted in R2
+RESTORE_OUTPUT="${RESTORE_OUTPUT:-0}"          # set to 1 to also restore outputs
+
+EXCLUDES=(--exclude "**/__pycache__/**" --exclude "**/.cache/**" --exclude "**/.ipynb_checkpoints/**"
+          --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete")
+RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-upload-concurrency 8
+              --stats 20s --stats-one-line --stats-log-level NOTICE --retries 5 --low-level-retries 20)
+
+mkdir -p "$LOG_DIR"
+log()  { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+die()  { log "ERROR: $*"; exit 1; }
+trap 'log "ERROR: vault ${CMD:-} failed (line $LINENO). See $LOG"' ERR
+
+# -----------------------------------------------------------------------------
+ensure_rclone() {
+    command -v rclone >/dev/null 2>&1 && return 0
+    log "Installing rclone..."
+    if ! command -v unzip >/dev/null 2>&1; then
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip </dev/null
+    fi
+    local tmp; tmp=$(mktemp -d)
+    curl -fsSL -o "$tmp/rclone.zip" https://downloads.rclone.org/rclone-current-linux-amd64.zip
+    unzip -q "$tmp/rclone.zip" -d "$tmp"
+    install -m 755 "$tmp"/rclone-*-linux-amd64/rclone /usr/local/bin/rclone
+    rm -rf "$tmp"
+}
+
+load_env() {
+    local k v
+    for k in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
+        if [ -z "${!k:-}" ] && [ -f /etc/environment ]; then
+            v=$(grep -m1 "^$k=" /etc/environment | cut -d= -f2- | sed 's/^"//; s/"$//' || true)
+            export "$k=$v"
+        fi
+        [ -n "${!k:-}" ] || die "$k is not set. Add it in Vast: Account > Settings > Environment Variables"
+    done
+    # Endpoint must be just https://<account>.r2.cloudflarestorage.com (strip any /bucket path)
+    R2_ENDPOINT=$(echo "$R2_ENDPOINT" | sed -E 's#^(https://[^/]+).*#\1#')
+    export RCLONE_CONFIG_R2_TYPE=s3
+    export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+    export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+    export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
+    export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
+    REMOTE="r2:$R2_BUCKET/comfyui"
+    TRASH="r2:$R2_BUCKET/trash"
+}
+
+take_lock() {
+    exec 9>/tmp/vault.lock
+    flock -n 9 || die "Another backup or restore is already running. Try again when it finishes."
+}
+
+need_comfy() { [ -d "$COMFY" ] || die "ComfyUI not found at $COMFY - run install_comfyui.sh first"; }
+
+rc() { rclone "$@" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" 2>&1 | tee -a "$LOG"; }
+
+restart_comfyui() {
+    if supervisorctl status comfyui >/dev/null 2>&1; then
+        log "Restarting ComfyUI..."
+        supervisorctl restart comfyui >/dev/null
+    else
+        log "NOTE: restart ComfyUI yourself to load restored nodes"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+cmd_setup() {
+    ensure_rclone
+    rclone version | head -1
+    load_env
+    log "Testing R2 bucket '$R2_BUCKET' (read + write)..."
+    rclone lsf "r2:$R2_BUCKET" --max-depth 1 >/dev/null \
+        || die "Cannot read the R2 bucket. Check R2_ENDPOINT, keys, and bucket name."
+    echo "test $(date)" | rclone rcat "$REMOTE/.vault_test" \
+        || die "Cannot write to the R2 bucket. The API token needs 'Object Read & Write'."
+    rclone deletefile "$REMOTE/.vault_test"
+    if [ "$(readlink -f "$0")" != "/usr/local/bin/vault" ]; then
+        install -m 755 "$0" /usr/local/bin/vault
+    fi
+    log "SETUP OK - R2 works. You can now use: vault backup | vault restore | vault status"
+}
+
+cmd_backup() {
+    ensure_rclone; load_env; need_comfy; take_lock
+    local stamp d; stamp=$(date '+%Y-%m-%d_%H%M%S')
+    log "===== BACKUP started ====="
+    if [ ! -f "$MARKER" ]; then
+        log "NOTE: no restore done on this instance yet - using safe mode (nothing deleted in R2)"
+    fi
+    for d in $MIRROR_DIRS; do
+        [ -d "$COMFY/$d" ] || continue
+        log "Backing up $d"
+        if [ -f "$MARKER" ]; then
+            # Mirror: files you deleted locally are moved to R2 trash, not destroyed
+            rc sync "$COMFY/$d" "$REMOTE/$d" --backup-dir "$TRASH/$stamp/$d"
+        else
+            rc copy "$COMFY/$d" "$REMOTE/$d"
+        fi
+    done
+    for d in $KEEP_DIRS; do
+        [ -d "$COMFY/$d" ] || continue
+        log "Backing up $d (never deleted in R2)"
+        rc copy "$COMFY/$d" "$REMOTE/$d"
+    done
+    local gpu; gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
+    echo "$(date '+%F %T %Z') instance=${CONTAINER_ID:-?} gpu=${gpu:-?}" | rclone rcat "$REMOTE/.last_backup"
+    date '+%F %T' > "$WORKSPACE/.vault_last_backup"
+    log "===== BACKUP COMPLETE ====="
+}
+
+install_node_requirements() {
+    local PIP dir name
+    if command -v uv >/dev/null 2>&1; then PIP=(uv pip install --python "$PY"); else PIP=("$PY" -m pip install); fi
+    [ -f "$CONSTRAINTS" ] && PIP+=(-c "$CONSTRAINTS")
+    for dir in "$COMFY"/custom_nodes/*/; do
+        name=$(basename "$dir")
+        if [ -f "$dir/requirements.txt" ]; then
+            log "Installing requirements: $name"
+            "${PIP[@]}" -r "$dir/requirements.txt" >>"$LOG" 2>&1 \
+                || log "WARNING: requirements failed for $name (node may not load)"
+        fi
+        if [ -f "$dir/install.py" ]; then
+            log "Running install.py: $name"
+            (cd "$dir" && timeout 600 "$PY" install.py) >>"$LOG" 2>&1 \
+                || log "WARNING: install.py failed for $name"
+        fi
+    done
+}
+
+cmd_restore() {
+    ensure_rclone; load_env; need_comfy; take_lock
+    local d
+    log "===== RESTORE started ====="
+    if [ -z "$(rclone lsf "$REMOTE" --max-depth 1 2>/dev/null | head -1 || true)" ]; then
+        log "R2 has no backup yet (first run) - nothing to restore"
+        touch "$MARKER"
+        log "===== RESTORE COMPLETE (nothing to restore) ====="
+        return 0
+    fi
+    rclone cat "$REMOTE/.last_backup" 2>/dev/null | sed 's/^/Last backup: /' | tee -a "$LOG" || true
+    for d in $MIRROR_DIRS; do
+        log "Restoring $d"
+        mkdir -p "$COMFY/$d"
+        rc copy "$REMOTE/$d" "$COMFY/$d"
+    done
+    if [ "$RESTORE_OUTPUT" = "1" ]; then
+        log "Restoring output"
+        rc copy "$REMOTE/output" "$COMFY/output"
+    fi
+    install_node_requirements
+    touch "$MARKER"
+    restart_comfyui
+    log "===== RESTORE COMPLETE ====="
+}
+
+cmd_status() {
+    ensure_rclone; load_env
+    local d
+    echo "---- Local (this instance) ----"
+    for d in $MIRROR_DIRS $KEEP_DIRS; do
+        if [ -d "$COMFY/$d" ]; then
+            du -sh "$COMFY/$d" 2>/dev/null | awk -v n="$d" '{printf "  %-13s %s\n", n, $1}' || true
+        fi
+    done
+    echo "---- R2 bucket $R2_BUCKET ----"
+    for d in $MIRROR_DIRS $KEEP_DIRS; do
+        printf "  %-13s " "$d"
+        rclone size "$REMOTE/$d" --fast-list 2>/dev/null | grep "Total size" | sed 's/Total size: //' || echo "-"
+    done
+    echo "---- Info ----"
+    echo "  Last backup (R2):       $(rclone cat "$REMOTE/.last_backup" 2>/dev/null || echo never)"
+    echo "  Restored on this instance: $([ -f "$MARKER" ] && echo yes || echo no)"
+    df -h "$WORKSPACE" | awk 'NR==2 {print "  Disk: " $3 " used of " $2 " (" $4 " free)"}'
+}
+
+# -----------------------------------------------------------------------------
+CMD="${1:-}"
+case "$CMD" in
+    setup)   cmd_setup ;;
+    backup)  cmd_backup ;;
+    restore) cmd_restore ;;
+    status)  cmd_status ;;
+    *) echo "Usage: vault setup | backup | restore | status"; exit 1 ;;
+esac
