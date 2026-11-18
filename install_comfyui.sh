@@ -116,7 +116,12 @@ exec python main.py --listen 127.0.0.1 --port $COMFY_PORT $MANAGER_FLAGS \${COMF
 EOF
 chmod +x /opt/supervisor-scripts/comfyui.sh
 
-if command -v supervisorctl >/dev/null 2>&1 && [ -d /etc/supervisor/conf.d ]; then
+supervisor_running() {
+    command -v supervisorctl >/dev/null 2>&1 && [ -d /etc/supervisor/conf.d ] \
+        && supervisorctl pid 2>/dev/null | grep -qE '^[0-9]+$'
+}
+
+start_with_supervisor() {
     cat > /etc/supervisor/conf.d/comfyui.conf <<EOF
 [program:comfyui]
 command=/opt/supervisor-scripts/comfyui.sh
@@ -131,13 +136,25 @@ stdout_logfile_maxbytes=20MB
 stdout_logfile_backups=2
 redirect_stderr=true
 EOF
-    supervisorctl reread >/dev/null
-    supervisorctl update >/dev/null
-    supervisorctl restart comfyui >/dev/null || true
-else
-    echo "supervisor not found - starting ComfyUI in the background instead"
+    supervisorctl reread  || return 1
+    supervisorctl update  || return 1
+    supervisorctl restart comfyui || return 1
+    echo "ComfyUI service registered with supervisor"
+}
+
+start_in_background() {
+    echo "Starting ComfyUI as a background process instead"
+    rm -f /etc/supervisor/conf.d/comfyui.conf
     pkill -f "main.py --listen 127.0.0.1 --port $COMFY_PORT" || true
-    nohup /opt/supervisor-scripts/comfyui.sh >> "$LOG_DIR/comfyui.log" 2>&1 &
+    sleep 1
+    nohup setsid /opt/supervisor-scripts/comfyui.sh >> "$LOG_DIR/comfyui.log" 2>&1 < /dev/null &
+}
+
+if supervisor_running; then
+    start_with_supervisor || { echo "WARNING: supervisor did not accept the service"; start_in_background; }
+else
+    echo "Supervisor is not running on this instance"
+    start_in_background
 fi
 
 echo "Waiting for ComfyUI to start (first start can take 1-2 minutes)..."
