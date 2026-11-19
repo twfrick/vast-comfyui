@@ -79,9 +79,11 @@ class LogBox:
 
     def _render(self):
         text = html.escape("\n".join(self.lines)) or "&nbsp;"
-        # column-reverse keeps the scroll position pinned to the newest line
+        # column-reverse + flex-end: text starts at the top, and once the box is full
+        # the view stays pinned to the newest line
         self.widget.value = (
             f"<div style='height:{self.height};overflow-y:auto;display:flex;flex-direction:column-reverse;"
+            f"justify-content:flex-end;overflow-anchor:none;"
             f"border:1px solid var(--jp-border-color1);border-radius:4px;"
             f"background:var(--jp-layout-color1);padding:6px'>"
             f"<pre style='margin:0;white-space:pre-wrap;font-size:12px;"
