@@ -33,9 +33,14 @@ command -v supervisorctl >/dev/null 2>&1 && supervisorctl pid 2>/dev/null | grep
 
 # ---------------------------------------------------------------- JupyterLab
 echo "--- JupyterLab (port $LAB_PORT)"
-if ! "$VENV/bin/python" -c "import jupyterlab" 2>/dev/null; then
-    if command -v uv >/dev/null 2>&1; then uv pip install --python "$VENV/bin/python" jupyterlab
-    else "$VENV/bin/python" -m pip install jupyterlab; fi
+if ! "$VENV/bin/python" -c "import jupyterlab, ipywidgets" 2>/dev/null; then
+    if command -v uv >/dev/null 2>&1; then uv pip install --python "$VENV/bin/python" jupyterlab ipywidgets
+    else "$VENV/bin/python" -m pip install jupyterlab ipywidgets; fi
+fi
+# The notebook kernel may be the system Python - give it ipywidgets too (menu needs only that)
+if [ -x /usr/bin/python3 ] && ! /usr/bin/python3 -c "import ipywidgets" 2>/dev/null; then
+    /usr/bin/python3 -m pip install -q --break-system-packages ipywidgets 2>/dev/null \
+        || echo "NOTE: could not add ipywidgets to system Python"
 fi
 mkdir -p "$WORKSPACE/.jupyter/lab/user-settings" "$WORKSPACE/.jupyter/lab/workspaces"
 
