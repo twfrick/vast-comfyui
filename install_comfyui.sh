@@ -4,7 +4,7 @@
 #
 #  * Installs ComfyUI into /workspace/ComfyUI
 #  * Makes sure PyTorch is a CUDA 12.8+ build (RTX 6000 Ada / 4090 / 5090 / A6000)
-#  * Enables the built-in ComfyUI-Manager (legacy UI = includes Model Manager)
+#  * Enables the built-in ComfyUI-Manager (new UI; MANAGER_UI=legacy for the old window)
 #  * Runs ComfyUI as a background service that restarts itself if it crashes
 #
 #  Safe to run again at any time: it only does what is missing / updates.
@@ -95,10 +95,19 @@ echo "Locked: $(tr '\n' ' ' < "$CONSTRAINTS")"
 step "5/6 ComfyUI + Manager requirements"
 "${PIP[@]}" -c "$CONSTRAINTS" -r "$COMFY_DIR/requirements.txt"
 MANAGER_FLAGS=""
+LEGACY_ENV=""
 if [ -f "$COMFY_DIR/manager_requirements.txt" ]; then
     "${PIP[@]}" -c "$CONSTRAINTS" -r "$COMFY_DIR/manager_requirements.txt"
-    MANAGER_FLAGS="--enable-manager --enable-manager-legacy-ui"
-    echo "ComfyUI-Manager enabled (legacy UI, includes Model Manager)"
+    # New Manager (default): works with the "Install missing nodes" buttons in ComfyUI.
+    # Set env MANAGER_UI=legacy for the old Manager window (those buttons then stop working).
+    if [ "${MANAGER_UI:-new}" = "legacy" ]; then
+        MANAGER_FLAGS="--enable-manager --enable-manager-legacy-ui"
+        LEGACY_ENV="export ENABLE_LEGACY_COMFYUI_MANAGER_FRONT=true"
+        echo "ComfyUI-Manager enabled (legacy UI)"
+    else
+        MANAGER_FLAGS="--enable-manager"
+        echo "ComfyUI-Manager enabled (new UI)"
+    fi
 else
     echo "WARNING: manager_requirements.txt not found - Manager not enabled"
 fi
@@ -126,8 +135,7 @@ cat > /opt/supervisor-scripts/comfyui.sh <<EOF
 #!/bin/bash
 # Started by supervisor. Extra ComfyUI options can be set in the COMFYUI_ARGS env var.
 source $VENV/bin/activate
-# Legacy Manager UI = "Manager" button with Model Manager (downloads models to the server)
-export ENABLE_LEGACY_COMFYUI_MANAGER_FRONT=true
+$LEGACY_ENV
 # Tokens for download nodes (Vast account env vars; fall back to /etc/environment)
 envval() { [ -n "\${!1:-}" ] && echo "\${!1}" || grep -m1 "^\$1=" /etc/environment 2>/dev/null | cut -d= -f2- | sed 's/^"//; s/"\$//'; }
 export HF_TOKEN="\$(envval HF_TOKEN)"
