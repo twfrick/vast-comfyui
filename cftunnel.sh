@@ -60,40 +60,7 @@ exec jupyter lab --no-browser --allow-root --ip=127.0.0.1 --port=$LAB_PORT \\
 EOF
 chmod +x /opt/supervisor-scripts/labvault.sh
 
-# ---------------------------------------------------------------- status page
-cat > /opt/supervisor-scripts/statuspage.sh <<'EOF'
-#!/bin/bash
-# "Is my instance ready?" page on 127.0.0.1:18999 (reach it via the tunnel: status.<your domain>)
-exec /usr/bin/python3 /opt/vault/statuspage.py
-EOF
-chmod +x /opt/supervisor-scripts/statuspage.sh
-
-# ---------------------------------------------------------------- cloudflared
-TOKEN="$(envval CF_TUNNEL_TOKEN)"
-if [ -z "$TOKEN" ]; then
-    echo "CF_TUNNEL_TOKEN not set - tunnel skipped (add it in Vast: Account > Settings > Environment Variables)"
-else
-    if [ ! -x "$CLOUDFLARED" ]; then
-        echo "--- Installing cloudflared"
-        curl -fsSL -o "$CLOUDFLARED" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x "$CLOUDFLARED"
-    fi
-    "$CLOUDFLARED" --version
-    cat > /opt/supervisor-scripts/cftunnel.sh <<'EOF'
-#!/bin/bash
-# Token: /opt/vault/cf_token (manual override) > CF_TUNNEL_TOKEN env > /etc/environment
-if [ -s /opt/vault/cf_token ]; then
-    TOKEN=$(cat /opt/vault/cf_token)
-else
-    TOKEN="${CF_TUNNEL_TOKEN:-$(grep -m1 '^CF_TUNNEL_TOKEN=' /etc/environment | cut -d= -f2- | sed 's/^"//; s/"$//')}"
-fi
-TOKEN=$(printf '%s' "$TOKEN" | tr -d " \r\n\"'")
-exec /opt/vault/cloudflared tunnel --no-autoupdate run --token "$TOKEN"
-EOF
-    chmod +x /opt/supervisor-scripts/cftunnel.sh
-fi
-
-# ---------------------------------------------------------------- services
+# ---------------------------------------------------------------- services helper
 write_conf() {   # name
     cat > "/etc/supervisor/conf.d/$1.conf" <<EOF
 [program:$1]
@@ -109,14 +76,57 @@ stdout_logfile_backups=1
 redirect_stderr=true
 EOF
 }
+
+# ---------------------------------------------------------------- status page
+cat > /opt/supervisor-scripts/statuspage.sh <<'EOF'
+#!/bin/bash
+# "Is my instance ready?" page on 127.0.0.1:18999 (reach it via the tunnel: status.<your domain>)
+exec /usr/bin/python3 /opt/vault/statuspage.py
+EOF
+chmod +x /opt/supervisor-scripts/statuspage.sh
+
+# Start JupyterLab + status page now (before any slow download)
 write_conf labvault
 [ -f /opt/vault/statuspage.py ] && write_conf statuspage
-[ -n "$TOKEN" ] && write_conf cftunnel
 supervisorctl reread
 supervisorctl update
 supervisorctl restart labvault
-[ -f /opt/vault/statuspage.py ] && supervisorctl restart statuspage
-[ -n "$TOKEN" ] && supervisorctl restart cftunnel
+if [ -f /opt/vault/statuspage.py ]; then supervisorctl restart statuspage; fi
+
+# ---------------------------------------------------------------- cloudflared
+TOKEN="$(envval CF_TUNNEL_TOKEN)"
+if [ -z "$TOKEN" ]; then
+    echo "CF_TUNNEL_TOKEN not set - tunnel skipped (add it in Vast: Account > Settings > Environment Variables)"
+elif [ ! -x "$CLOUDFLARED" ]; then
+    echo "--- Installing cloudflared"
+    if curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$CLOUDFLARED.tmp" \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; then
+        mv "$CLOUDFLARED.tmp" "$CLOUDFLARED"; chmod +x "$CLOUDFLARED"
+    else
+        rm -f "$CLOUDFLARED.tmp"
+        echo "ERROR: could not download cloudflared - tunnel skipped"
+        TOKEN=""
+    fi
+fi
+if [ -n "$TOKEN" ]; then
+    "$CLOUDFLARED" --version
+    cat > /opt/supervisor-scripts/cftunnel.sh <<'EOF'
+#!/bin/bash
+# Token: /opt/vault/cf_token (manual override) > CF_TUNNEL_TOKEN env > /etc/environment
+if [ -s /opt/vault/cf_token ]; then
+    TOKEN=$(cat /opt/vault/cf_token)
+else
+    TOKEN="${CF_TUNNEL_TOKEN:-$(grep -m1 '^CF_TUNNEL_TOKEN=' /etc/environment | cut -d= -f2- | sed 's/^"//; s/"$//')}"
+fi
+TOKEN=$(printf '%s' "$TOKEN" | tr -d " \r\n\"'")
+exec /opt/vault/cloudflared tunnel --no-autoupdate run --token "$TOKEN"
+EOF
+    chmod +x /opt/supervisor-scripts/cftunnel.sh
+    write_conf cftunnel
+    supervisorctl reread
+    supervisorctl update
+    supervisorctl restart cftunnel
+fi
 
 # ---------------------------------------------------------------- check
 echo "--- Checking"
