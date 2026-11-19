@@ -44,6 +44,14 @@ if [ -x /usr/bin/python3 ] && ! /usr/bin/python3 -c "import ipywidgets" 2>/dev/n
         || echo "NOTE: could not add ipywidgets to system Python"
 fi
 mkdir -p "$WORKSPACE/.jupyter/lab/user-settings" "$WORKSPACE/.jupyter/lab/workspaces"
+# Stop JupyterLab jumping to the top of the notebook when the menu's logs update
+LABSET="$VENV/share/jupyter/lab/settings"
+mkdir -p "$LABSET"
+cat > "$LABSET/overrides.json" <<'EOF'
+{
+  "@jupyterlab/notebook-extension:tracker": { "windowingMode": "none" }
+}
+EOF
 
 cat > /opt/supervisor-scripts/labvault.sh <<EOF
 #!/bin/bash
