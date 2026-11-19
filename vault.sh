@@ -34,7 +34,7 @@ RESTORE_OUTPUT="${RESTORE_OUTPUT:-0}"          # set to 1 to also restore output
 EXCLUDES=(--exclude "**/__pycache__/**" --exclude "**/.cache/**" --exclude "**/.ipynb_checkpoints/**"
           --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete")
 RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-upload-concurrency 8
-              --stats 20s --stats-one-line --stats-log-level NOTICE --retries 5 --low-level-retries 20)
+              --stats 5s --stats-one-line --stats-log-level NOTICE --retries 5 --low-level-retries 20)
 
 mkdir -p "$LOG_DIR"
 log()  { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
