@@ -43,6 +43,14 @@ fetch() {   # GitHub API = always the newest file (no raw cache). Token avoids r
 }
 for f in $FILES; do fetch "$f"; done
 
+# Host internet speed check (shown on the status page) - slow hosts make restores take hours
+SPEED=$(curl -s -o /dev/null --max-time 20 -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=50000000" || echo 0)
+SPEED_MB=$(awk -v s="${SPEED:-0}" 'BEGIN{printf "%.0f", s/1048576}')
+echo "Host download speed: ${SPEED_MB} MB/s"
+if [ "${SPEED_MB:-0}" -lt 20 ]; then
+    echo "WARNING: SLOW HOST (${SPEED_MB} MB/s) - consider destroying this instance and renting another"
+fi
+
 # Tunnel first, so the status page (status.<domain>) shows progress during setup
 stage "Cloudflare Tunnel + JupyterLab + status page"
 bash "$DEST/cftunnel.sh" || echo "WARNING: tunnel setup had problems - see /workspace/logs/cftunnel_setup.log"
