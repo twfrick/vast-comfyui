@@ -140,6 +140,14 @@ class ProgressRow:
         self.status.value = text
 
 
+def to_bytes(v):
+    """'1.9GiB' / '400MiB' / '512KiB' / '12B' -> bytes"""
+    m = re.match(r"([\d.]+)\s*([KMGT]?)i?B", v)
+    if not m:
+        return 0
+    return float(m.group(1)) * 1024 ** "_KMGT".index(m.group(2) or "_")
+
+
 ARIA_PROGRESS = re.compile(r"\[#\w+\s+([\d.]+\w+)/([\d.]+\w+)\((\d+)%\)[^\]]*?DL:([\d.]+\w+)(?:\s+ETA:(\w+))?")
 ARIA_NOISE = ("***", "====", "----", "FILE:")
 
@@ -151,9 +159,10 @@ def aria_filter(bar):
         if m:
             done, total, pct, speed, eta = m.groups()
             if bar:
-                tidy = lambda v: v.replace("iB", "B")
-                bar.update(int(pct), f"{pct}% &nbsp; {tidy(done)} / {tidy(total)} &nbsp; "
-                                     f"{tidy(speed)}/s" + (f" &nbsp; ETA {eta}" if eta else ""))
+                left = human(max(to_bytes(total) - to_bytes(done), 0))
+                bar.update(int(pct), f"{pct}% &nbsp; {human(to_bytes(done))} / {human(to_bytes(total))} "
+                                     f"&nbsp; <b>{left} left</b> &nbsp; {human(to_bytes(speed))}/s"
+                                     + (f" &nbsp; ETA {eta}" if eta else ""))
             return True
         return line.strip().startswith(ARIA_NOISE)
     return on_line
