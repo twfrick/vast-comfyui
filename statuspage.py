@@ -103,6 +103,17 @@ def stage_times(run):
     return spent, total
 
 
+def speed_line(run):
+    m = re.search(r"Host download speed: (\d+) MB/s", run)
+    if not m:
+        return "<div class='st'>&#9203; Measuring host internet speed&hellip;</div>"
+    mb = int(m.group(1))
+    if mb < 20:
+        return (f"<div class='b bad'>SLOW HOST: {mb} MB/s download &mdash; destroy this instance "
+                f"and rent another (sort by Inet Down)</div>")
+    return f"<div class='st'>&#128246; Host download speed: <b>{mb} MB/s</b></div>"
+
+
 def status():
     """Current state as a dict (sent to the page as JSON every few seconds)."""
     run = current_run()
@@ -146,7 +157,7 @@ def status():
     return {
         "title": "READY" if (done and comfy_ok) else ("FAILED" if failed else "Setting up"),
         "banner": f"<div class='b {cls}'>{banner}</div>",
-        "steps": "".join(rows) + restore_progress(run), "links": links, "updated": updated,
+        "steps": speed_line(run) + "".join(rows) + restore_progress(run), "links": links, "updated": updated,
         "log": "\n".join(run.splitlines()[-200:]) or "(no log yet)",
     }
 
