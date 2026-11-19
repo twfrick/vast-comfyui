@@ -19,7 +19,8 @@ FILES="statuspage.py cftunnel.sh install_comfyui.sh vault.sh vault_menu.py Comfy
 mkdir -p "$DEST" /workspace/logs
 exec > >(tee -a /workspace/logs/provision.log) 2>&1
 trap 'echo "PROVISION FAILED on line $LINENO - see /workspace/logs/provision.log"' ERR
-echo "===== PROVISION started $(date) ====="
+stage() { echo; echo "===== $* ===== [t=$(date +%s)]"; }
+stage "PROVISION started $(date)"
 
 # Load account env vars if the provisioner didn't pass them through
 if [ -z "${R2_BUCKET:-}" ] && [ -f /etc/environment ]; then
@@ -43,21 +44,21 @@ fetch() {   # GitHub API = always the newest file (no raw cache). Token avoids r
 for f in $FILES; do fetch "$f"; done
 
 # Tunnel first, so the status page (status.<domain>) shows progress during setup
-echo; echo "===== Cloudflare Tunnel + JupyterLab + status page ====="
+stage "Cloudflare Tunnel + JupyterLab + status page"
 bash "$DEST/cftunnel.sh" || echo "WARNING: tunnel setup had problems - see /workspace/logs/cftunnel_setup.log"
 
-echo; echo "===== Installing ComfyUI ====="
+stage "Installing ComfyUI"
 bash "$DEST/install_comfyui.sh"
 
-echo; echo "===== Restoring vault from R2 ====="
+stage "Restoring vault from R2"
 bash "$DEST/vault.sh" setup
 vault restore
 
 
-echo; echo "===== Jupyter menu ====="
+stage "Jupyter menu"
 cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
 # JupyterLab can't open folders named "checkpoints" (bug) - give it a browsable shortcut
 ln -sfn /workspace/ComfyUI/models/checkpoints /workspace/checkpoints-view
 echo "Menu: open /workspace/ComfyUI-Menu.ipynb in JupyterLab"
 
-echo; echo "===== PROVISION COMPLETE $(date) ====="
+stage "PROVISION COMPLETE $(date)"
