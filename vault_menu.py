@@ -84,8 +84,9 @@ class LogBox:
         self.widget.value = ""
 
 
-def run_cmd(cmd, log, cwd=None, hide=None):
-    """Run a command, stream its output to the log, return exit code."""
+def run_cmd(cmd, log, cwd=None, hide=None, on_line=None):
+    """Run a command, stream its output to the log, return exit code.
+    on_line(line) may return True to swallow a line (e.g. progress updates)."""
     shown = " ".join(cmd) if isinstance(cmd, list) else cmd
     if hide:
         shown = shown.replace(hide, "***")
@@ -96,6 +97,8 @@ def run_cmd(cmd, log, cwd=None, hide=None):
         line = line.rstrip()
         if hide:
             line = line.replace(hide, "***")
+        if on_line and on_line(line):
+            continue
         if line:
             log(line)
     return proc.wait()
@@ -116,34 +119,85 @@ def in_background(name, log, fn, *args):
     threading.Thread(target=worker, daemon=True).start()
 
 
-def download_file(url, dest_dir, filename, log, headers=None, hide=None):
+class ProgressRow:
+    """One progress bar per download: name | bar | 42%  1.2 GB / 6.5 GB  250 MB/s  ETA 21s"""
+    def __init__(self, title="starting..."):
+        self.name = W.HTML(f"<b>{title}</b>", layout=W.Layout(width="34%"))
+        self.bar = W.FloatProgress(value=0, min=0, max=100, layout=W.Layout(width="36%"))
+        self.status = W.HTML("waiting...", layout=W.Layout(width="30%"))
+        self.widget = W.HBox([self.name, self.bar, self.status])
+
+    def set_name(self, name):
+        self.name.value = f"<b>{name}</b>"
+
+    def update(self, pct, text):
+        self.bar.value = pct
+        self.status.value = text
+
+    def finish(self, ok, text):
+        self.bar.value = 100 if ok else self.bar.value
+        self.bar.bar_style = "success" if ok else "danger"
+        self.status.value = text
+
+
+ARIA_PROGRESS = re.compile(r"\[#\w+\s+([\d.]+\w+)/([\d.]+\w+)\((\d+)%\)[^\]]*?DL:([\d.]+\w+)(?:\s+ETA:(\w+))?")
+ARIA_NOISE = ("***", "====", "----", "FILE:")
+
+
+def aria_filter(bar):
+    """Turn aria2c summary lines into progress-bar updates."""
+    def on_line(line):
+        m = ARIA_PROGRESS.search(line)
+        if m:
+            done, total, pct, speed, eta = m.groups()
+            if bar:
+                tidy = lambda v: v.replace("iB", "B")
+                bar.update(int(pct), f"{pct}% &nbsp; {tidy(done)} / {tidy(total)} &nbsp; "
+                                     f"{tidy(speed)}/s" + (f" &nbsp; ETA {eta}" if eta else ""))
+            return True
+        return line.strip().startswith(ARIA_NOISE)
+    return on_line
+
+
+def download_file(url, dest_dir, filename, log, headers=None, hide=None, bar=None):
     """aria2c (fast, 16 connections) with curl fallback. Returns True on success."""
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / filename
+    if bar:
+        bar.set_name(filename)
     if target.exists() and not (dest_dir / (filename + ".aria2")).exists():
         log(f"Already exists, skipped: {target}")
+        if bar:
+            bar.finish(True, "already exists")
         return True
     log(f"Downloading {filename}\n  -> {dest_dir}")
     cmd = ["aria2c", "-x", "16", "-s", "16", "-k", "1M", "--continue=true", "--file-allocation=none",
            f"--user-agent={UA}",
-           "--auto-file-renaming=false", "--allow-overwrite=true", "--summary-interval=10",
+           "--auto-file-renaming=false", "--allow-overwrite=true", "--summary-interval=1",
            "--show-console-readout=false", "--console-log-level=warn", "--download-result=hide",
            "-d", str(dest_dir), "-o", filename]
     for h in headers or []:
         cmd += ["--header", h]
-    if shutil.which("aria2c") and run_cmd(cmd + [url], log, hide=hide) == 0:
+    if shutil.which("aria2c") and run_cmd(cmd + [url], log, hide=hide, on_line=aria_filter(bar)) == 0:
         ok = True
     else:
         log("aria2c failed - retrying with curl")
+        if bar:
+            bar.update(0, "retrying (no progress shown)...")
         cmd = ["curl", "-fL", "--retry", "3", "-A", UA, "-o", str(target)]
         for h in headers or []:
             cmd += ["-H", h]
         ok = run_cmd(cmd + [url], log, hide=hide) == 0
     if ok and target.exists():
-        log(f"DONE: {target.name} ({human(target.stat().st_size)})")
+        size = human(target.stat().st_size)
+        log(f"DONE: {target.name} ({size})")
+        if bar:
+            bar.finish(True, f"done &nbsp; {size}")
         return True
     log("DOWNLOAD FAILED")
+    if bar:
+        bar.finish(False, "FAILED - see log below")
     return False
 
 
@@ -159,11 +213,11 @@ def hf_parse(url):
     return f"https://huggingface.co/{repo}/resolve/{rev}/{path}", path.split("/")[-1]
 
 
-def hf_download(url, folder, log):
+def hf_download(url, folder, log, bar=None):
     direct, name = hf_parse(url)
     token = env("HF_TOKEN")
     headers = [f"Authorization: Bearer {token}"] if token else []
-    download_file(direct, MODELS / folder, name, log, headers=headers, hide=token or None)
+    download_file(direct, MODELS / folder, name, log, headers=headers, hide=token or None, bar=bar)
 
 
 # ----------------------------------------------------------------------------- Civitai
@@ -197,7 +251,7 @@ def civitai_version_id(text, token):
     raise ValueError("Paste a Civitai model link (or a model version ID)")
 
 
-def civitai_download(text, folder, log):
+def civitai_download(text, folder, log, bar=None):
     token = env("CIVITAI_TOKEN")
     vid = civitai_version_id(text, token)
     info = civitai_api(f"model-versions/{vid}", token)
@@ -213,7 +267,7 @@ def civitai_download(text, folder, log):
     url = f["downloadUrl"]
     if token:
         url += ("&" if "?" in url else "?") + "token=" + token
-    download_file(url, MODELS / folder, f["name"], log, hide=token or None)
+    download_file(url, MODELS / folder, f["name"], log, hide=token or None, bar=bar)
 
 
 # ----------------------------------------------------------------------------- GitHub nodes
@@ -349,6 +403,9 @@ def show():
     murl = W.Text(placeholder="Paste the model link here", description="Link:", style=style, layout=wide)
     mfolder = W.Dropdown(options=model_folders(), description="Save to models/", style=style)
     mbtn = W.Button(description="Download", button_style="primary", icon="download")
+    mlist = W.Button(description="List folder", icon="folder-open")
+    mclear = W.Button(description="Clear finished", icon="eraser")
+    mprog = W.VBox([])          # one progress row per download
     mhelp = W.HTML()
 
     def on_src(_=None):
@@ -372,12 +429,38 @@ def show():
             mlog("Paste a link first.")
             return
         murl.value = ""
+        row = ProgressRow("looking up " + ("Hugging Face" if which == "Hugging Face" else "Civitai") + "...")
+        mprog.children = tuple(mprog.children) + (row.widget,)
         fn = hf_download if which == "Hugging Face" else civitai_download
-        in_background("download", mlog, fn, link, folder, mlog)
+
+        def job():
+            try:
+                fn(link, folder, mlog, row)
+            except Exception as e:  # noqa: BLE001
+                row.finish(False, "FAILED - see log below")
+                raise e
+        in_background("download", mlog, job)
     mbtn.on_click(on_model)
-    models_tab = W.VBox([src, mhelp, murl, W.HBox([mfolder, mbtn]),
+
+    def on_list(_):
+        folder = mfolder.value
+        if folder in (None, "Auto"):
+            mlog("Pick a folder (not Auto) to list it.")
+            return
+        d = MODELS / folder
+        files = sorted(p for p in d.rglob("*") if p.is_file()) if d.exists() else []
+        mlog(f"--- models/{folder}: {len(files)} file(s)")
+        for p in files:
+            mlog(f"  {human(p.stat().st_size):>10}  {p.relative_to(d)}")
+    mlist.on_click(on_list)
+
+    def on_clear(_):
+        mprog.children = tuple(w for w in mprog.children
+                               if w.children[1].bar_style not in ("success", "danger"))
+    mclear.on_click(on_clear)
+    models_tab = W.VBox([src, mhelp, murl, W.HBox([mfolder, mbtn, mlist, mclear]),
                          W.HTML("<small>You can start several downloads; they run in the background.</small>"),
-                         mlog.widget])
+                         mprog, mlog.widget])
 
     # ---------- Nodes tab
     nlog = LogBox()
