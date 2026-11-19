@@ -104,6 +104,21 @@ else
 fi
 mkdir -p "$COMFY_DIR/user/default/workflows" "$COMFY_DIR/output" "$COMFY_DIR/input"
 
+# Always-installed nodes: server-side model downloads
+#   ComfyUI-RunpodDirect -> "Download to Pod" button in the Missing Models dialog
+#   Civicomfy            -> search + download Civitai models inside ComfyUI
+DEFAULT_NODES="https://github.com/MadiatorLabs/ComfyUI-RunpodDirect https://github.com/MoonGoblinDev/Civicomfy"
+for url in $DEFAULT_NODES; do
+    dir="$COMFY_DIR/custom_nodes/$(basename "$url")"
+    if [ ! -d "$dir" ]; then
+        echo "Adding node: $(basename "$url")"
+        git clone --depth 1 "$url.git" "$dir" || { echo "WARNING: could not clone $url"; continue; }
+    fi
+    if [ -f "$dir/requirements.txt" ]; then
+        "${PIP[@]}" -c "$CONSTRAINTS" -r "$dir/requirements.txt" || echo "WARNING: requirements failed for $(basename "$url")"
+    fi
+done
+
 # -----------------------------------------------------------------------------
 step "6/6 ComfyUI service"
 mkdir -p /opt/supervisor-scripts
@@ -113,6 +128,11 @@ cat > /opt/supervisor-scripts/comfyui.sh <<EOF
 source $VENV/bin/activate
 # Legacy Manager UI = "Manager" button with Model Manager (downloads models to the server)
 export ENABLE_LEGACY_COMFYUI_MANAGER_FRONT=true
+# Tokens for download nodes (Vast account env vars; fall back to /etc/environment)
+envval() { [ -n "\${!1:-}" ] && echo "\${!1}" || grep -m1 "^\$1=" /etc/environment 2>/dev/null | cut -d= -f2- | sed 's/^"//; s/"\$//'; }
+export HF_TOKEN="\$(envval HF_TOKEN)"
+export CIVITAI_TOKEN="\$(envval CIVITAI_TOKEN)"
+export CIVITAI_API_KEY="\${CIVITAI_API_KEY:-\$CIVITAI_TOKEN}"
 cd $COMFY_DIR
 # --enable-cors-header: ComfyUI sits behind Vast's proxy, so the browser's address
 # differs from 127.0.0.1 - without this, saving workflows fails with 403 Forbidden.
