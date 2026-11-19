@@ -5,6 +5,7 @@ Open /workspace/ComfyUI-Menu.ipynb in JupyterLab and run its single cell.
 Tabs: Models (Hugging Face / Civitai) | Nodes (GitHub) | Outputs (browser download)
       | Vault (R2 backup/restore) | ComfyUI (restart / log)
 """
+import html
 import json
 import os
 import re
@@ -68,20 +69,33 @@ def model_folders():
 
 
 class LogBox:
-    """Scrolling text log that can be updated from background threads."""
+    """Log panel that always shows the newest lines (sticks to the bottom as text arrives).
+    Safe to update from background threads."""
     def __init__(self, height="260px"):
         self.lines = []
-        self.widget = W.Textarea(layout=W.Layout(width="100%", height=height), disabled=True)
+        self.height = height
+        self.widget = W.HTML(layout=W.Layout(width="100%"))
+        self._render()
+
+    def _render(self):
+        text = html.escape("\n".join(self.lines)) or "&nbsp;"
+        # column-reverse keeps the scroll position pinned to the newest line
+        self.widget.value = (
+            f"<div style='height:{self.height};overflow-y:auto;display:flex;flex-direction:column-reverse;"
+            f"border:1px solid var(--jp-border-color1);border-radius:4px;"
+            f"background:var(--jp-layout-color1);padding:6px'>"
+            f"<pre style='margin:0;white-space:pre-wrap;font-size:12px;"
+            f"color:var(--jp-content-font-color1)'>{text}</pre></div>")
 
     def __call__(self, msg=""):
         for line in str(msg).rstrip("\n").split("\n"):
             self.lines.append(line)
-        self.lines = self.lines[-300:]
-        self.widget.value = "\n".join(self.lines)
+        self.lines = self.lines[-400:]
+        self._render()
 
     def clear(self):
         self.lines = []
-        self.widget.value = ""
+        self._render()
 
 
 def run_cmd(cmd, log, cwd=None, hide=None, on_line=None):
@@ -553,9 +567,12 @@ def show():
     vb = W.Button(description="Backup now", button_style="primary", icon="cloud-upload")
     vs = W.Button(description="Status", icon="info")
     vr = W.Button(description="Restore from R2", icon="cloud-download")
-    vb.on_click(lambda _: in_background("backup", vlog, run_cmd, ["vault", "backup"], vlog))
-    vs.on_click(lambda _: in_background("status", vlog, run_cmd, ["vault", "status"], vlog))
-    vr.on_click(lambda _: in_background("restore", vlog, run_cmd, ["vault", "restore"], vlog))
+    def vault_cmd(*args):
+        vlog.clear()
+        in_background(args[0], vlog, run_cmd, ["vault", *args], vlog)
+    vb.on_click(lambda _: vault_cmd("backup"))
+    vs.on_click(lambda _: vault_cmd("status"))
+    vr.on_click(lambda _: vault_cmd("restore"))
     # power controls: back up first, then ask Vast to stop/destroy this instance
     pstop = W.Button(description="Backup & STOP", button_style="warning", icon="pause")
     pdestroy = W.Button(description="Backup & DESTROY", button_style="danger", icon="trash")
@@ -564,6 +581,7 @@ def show():
 
     def power(mode, extra=None):
         cmd = ["vault", "shutdown", mode] + ([extra] if extra else [])
+        vlog.clear()
         vlog(f">>> {' '.join(cmd)} - keep this tab open until it says Vast accepted")
         in_background("shutdown", vlog, run_cmd, cmd, vlog)
 
@@ -590,7 +608,10 @@ def show():
     clog = LogBox()
     crestart = W.Button(description="Restart ComfyUI", button_style="warning", icon="refresh")
     ctail = W.Button(description="Show ComfyUI log", icon="file-text")
-    crestart.on_click(lambda _: in_background("restart", clog, restart_comfyui, clog))
+    def on_restart(_):
+        clog.clear()
+        in_background("restart", clog, restart_comfyui, clog)
+    crestart.on_click(on_restart)
 
     def on_tail(_):
         clog.clear()
