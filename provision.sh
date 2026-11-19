@@ -14,7 +14,7 @@ set -Eeuo pipefail
 REPO="${VAULT_REPO:-twfrick/vast-comfyui}"   # GitHub user/repo with the scripts
 BRANCH="${VAULT_BRANCH:-main}"
 DEST="/opt/vault"
-FILES="install_comfyui.sh vault.sh cftunnel.sh"
+FILES="install_comfyui.sh vault.sh cftunnel.sh vault_menu.py ComfyUI-Menu.ipynb"
 
 mkdir -p "$DEST" /workspace/logs
 exec > >(tee -a /workspace/logs/provision.log) 2>&1
@@ -51,5 +51,9 @@ vault restore
 
 echo; echo "===== Cloudflare Tunnel + JupyterLab ====="
 bash "$DEST/cftunnel.sh" || echo "WARNING: tunnel setup had problems - see /workspace/logs/cftunnel_setup.log"
+
+echo; echo "===== Jupyter menu ====="
+cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
+echo "Menu: open /workspace/ComfyUI-Menu.ipynb in JupyterLab"
 
 echo; echo "===== PROVISION COMPLETE $(date) ====="
