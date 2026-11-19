@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -29,6 +30,8 @@ CONSTRAINTS = WORKSPACE / ".torch-constraints.txt"
 DOWNLOADED_LIST = WORKSPACE / ".outputs_downloaded.txt"
 BUSY_DIR = WORKSPACE / ".busy"          # idle watcher won't stop the instance while files exist here
 COMFY_URL = os.environ.get("COMFY_URL", "https://comfyui.centarione.org")
+# Civitai/Cloudflare block Python's default user agent (HTTP 403) - send a normal one
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 CIVITAI_TYPE_FOLDER = {
     "Checkpoint": "checkpoints", "LORA": "loras", "LoCon": "loras", "DoRA": "loras",
@@ -123,6 +126,7 @@ def download_file(url, dest_dir, filename, log, headers=None, hide=None):
         return True
     log(f"Downloading {filename}\n  -> {dest_dir}")
     cmd = ["aria2c", "-x", "16", "-s", "16", "-k", "1M", "--continue=true", "--file-allocation=none",
+           f"--user-agent={UA}",
            "--auto-file-renaming=false", "--allow-overwrite=true", "--summary-interval=10",
            "--show-console-readout=false", "--console-log-level=warn", "--download-result=hide",
            "-d", str(dest_dir), "-o", filename]
@@ -132,7 +136,7 @@ def download_file(url, dest_dir, filename, log, headers=None, hide=None):
         ok = True
     else:
         log("aria2c failed - retrying with curl")
-        cmd = ["curl", "-fL", "--retry", "3", "-o", str(target)]
+        cmd = ["curl", "-fL", "--retry", "3", "-A", UA, "-o", str(target)]
         for h in headers or []:
             cmd += ["-H", h]
         ok = run_cmd(cmd + [url], log, hide=hide) == 0
@@ -164,10 +168,19 @@ def hf_download(url, folder, log):
 
 # ----------------------------------------------------------------------------- Civitai
 def civitai_api(path, token):
-    req = urllib.request.Request(f"https://civitai.com/api/v1/{path}",
-                                 headers={"Authorization": f"Bearer {token}"} if token else {})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
+    headers = {"User-Agent": UA, "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(f"https://civitai.com/api/v1/{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        body = e.read()[:300].decode("utf-8", "ignore")
+        hint = {401: "Civitai key missing or invalid (CIVITAI_TOKEN)",
+                403: "Civitai refused the request (key, or model needs login/early access)",
+                404: "Model or version not found - check the link"}.get(e.code, "")
+        raise RuntimeError(f"Civitai API HTTP {e.code}. {hint}\n{body}") from None
 
 
 def civitai_version_id(text, token):
