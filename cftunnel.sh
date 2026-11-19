@@ -4,6 +4,7 @@
 #
 #   * Starts your own JupyterLab (always opens in Lab, settings saved in
 #     /workspace/.jupyter, which vault backs up) on 127.0.0.1:18888
+#   * Starts the setup status page (127.0.0.1:18999)
 #   * Starts cloudflared with your tunnel token, so your Cloudflare hostnames
 #     (e.g. comfy.yourdomain.com, lab.yourdomain.com) reach this instance
 #
@@ -59,6 +60,14 @@ exec jupyter lab --no-browser --allow-root --ip=127.0.0.1 --port=$LAB_PORT \\
 EOF
 chmod +x /opt/supervisor-scripts/labvault.sh
 
+# ---------------------------------------------------------------- status page
+cat > /opt/supervisor-scripts/statuspage.sh <<'EOF'
+#!/bin/bash
+# "Is my instance ready?" page on 127.0.0.1:18999 (reach it via the tunnel: status.<your domain>)
+exec /usr/bin/python3 /opt/vault/statuspage.py
+EOF
+chmod +x /opt/supervisor-scripts/statuspage.sh
+
 # ---------------------------------------------------------------- cloudflared
 TOKEN="$(envval CF_TUNNEL_TOKEN)"
 if [ -z "$TOKEN" ]; then
@@ -101,10 +110,12 @@ redirect_stderr=true
 EOF
 }
 write_conf labvault
+[ -f /opt/vault/statuspage.py ] && write_conf statuspage
 [ -n "$TOKEN" ] && write_conf cftunnel
 supervisorctl reread
 supervisorctl update
 supervisorctl restart labvault
+[ -f /opt/vault/statuspage.py ] && supervisorctl restart statuspage
 [ -n "$TOKEN" ] && supervisorctl restart cftunnel
 
 # ---------------------------------------------------------------- check
