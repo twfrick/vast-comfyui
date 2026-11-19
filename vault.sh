@@ -6,6 +6,7 @@
 #   vault backup    copy models, custom_nodes, workflows, input, output -> R2
 #   vault restore   copy everything back from R2 + reinstall node requirements
 #   vault status    show local vs R2 sizes and last backup time
+#   vault shutdown stop|destroy [--no-backup]   back up, then stop or destroy this instance
 #
 # Saved in R2 (bucket $R2_BUCKET):
 #   comfyui/models        comfyui/custom_nodes   comfyui/user (workflows+settings)
@@ -228,11 +229,53 @@ cmd_status() {
 }
 
 # -----------------------------------------------------------------------------
+envget() {   # value from environment, else /etc/environment
+    local k="$1"
+    if [ -n "${!k:-}" ]; then echo "${!k}"; return; fi
+    grep -m1 "^$k=" /etc/environment 2>/dev/null | cut -d= -f2- | sed 's/^"//; s/"$//' || true
+}
+
+vast_api() {   # METHOD [json-body]  -> acts on this instance via the Vast API
+    local id key code
+    id="$(envget CONTAINER_ID)"
+    key="$(envget VAST_API_KEY)"                       # optional: full account key
+    [ -n "$key" ] || key="$(envget CONTAINER_API_KEY)" # default: this instance's own key
+    [ -n "$id" ]  || die "CONTAINER_ID unknown - is this a Vast instance?"
+    [ -n "$key" ] || die "No Vast API key found (CONTAINER_API_KEY / VAST_API_KEY)"
+    code=$(curl -sS -o /tmp/vast_api.out -w "%{http_code}" -X "$1" \
+        -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
+        ${2:+-d "$2"} "https://console.vast.ai/api/v0/instances/$id/") || code=000
+    if [ "${code:0:1}" != "2" ]; then
+        log "Vast API answered HTTP $code: $(head -c 300 /tmp/vast_api.out 2>/dev/null)"
+        die "Vast refused the request. If this says 401/403, add your account API key as VAST_API_KEY in Vast settings."
+    fi
+}
+
+cmd_shutdown() {   # stop|destroy [--no-backup]
+    local mode="${1:-}" opt="${2:-}"
+    case "$mode" in stop|destroy) ;; *) die "Usage: vault shutdown stop|destroy [--no-backup]" ;; esac
+    if [ "$opt" = "--no-backup" ]; then
+        [ "$mode" = "destroy" ] && die "Refusing to destroy without a backup."
+        log "Skipping backup (stop keeps this instance's disk)"
+    else
+        cmd_backup      # exits on failure, so we never stop/destroy after a failed backup
+    fi
+    log "===== Asking Vast to ${mode^^} instance $(envget CONTAINER_ID) ====="
+    if [ "$mode" = "destroy" ]; then
+        vast_api DELETE
+    else
+        vast_api PUT '{"state": "stopped"}'
+    fi
+    log "Vast accepted - this instance will shut down in a few seconds."
+}
+
+# -----------------------------------------------------------------------------
 CMD="${1:-}"
 case "$CMD" in
     setup)   cmd_setup ;;
     backup)  cmd_backup ;;
     restore) cmd_restore ;;
     status)  cmd_status ;;
-    *) echo "Usage: vault setup | backup | restore | status"; exit 1 ;;
+    shutdown) cmd_shutdown "${2:-}" "${3:-}" ;;
+    *) echo "Usage: vault setup | backup | restore | status | shutdown stop|destroy [--no-backup]"; exit 1 ;;
 esac
