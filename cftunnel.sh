@@ -99,13 +99,29 @@ if [ -z "$TOKEN" ]; then
     echo "CF_TUNNEL_TOKEN not set - tunnel skipped (add it in Vast: Account > Settings > Environment Variables)"
 elif [ ! -x "$CLOUDFLARED" ]; then
     echo "--- Installing cloudflared"
-    if curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$CLOUDFLARED.tmp" \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; then
+    # 1) GitHub release - give up quickly if the host's GitHub download is crawling
+    if curl -fsSL --connect-timeout 15 --speed-limit 300000 --speed-time 15 --max-time 180 \
+            -o "$CLOUDFLARED.tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; then
         mv "$CLOUDFLARED.tmp" "$CLOUDFLARED"; chmod +x "$CLOUDFLARED"
+        echo "cloudflared from GitHub"
     else
         rm -f "$CLOUDFLARED.tmp"
-        echo "ERROR: could not download cloudflared - tunnel skipped"
-        TOKEN=""
+        # 2) Cloudflare's own package repository (served by Cloudflare's network)
+        echo "GitHub download too slow/failed - trying pkg.cloudflare.com"
+        mkdir -p --mode=0755 /usr/share/keyrings
+        if curl -fsSL --max-time 60 https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg \
+           && echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \
+                > /etc/apt/sources.list.d/cloudflared.list \
+           && timeout 300 apt-get update -qq -o Dir::Etc::sourcelist=sources.list.d/cloudflared.list \
+                -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 \
+           && DEBIAN_FRONTEND=noninteractive timeout 300 apt-get install -y -qq cloudflared </dev/null \
+           && [ -x /usr/bin/cloudflared ]; then
+            ln -sf /usr/bin/cloudflared "$CLOUDFLARED"
+            echo "cloudflared from pkg.cloudflare.com"
+        else
+            echo "ERROR: could not install cloudflared - tunnel skipped"
+            TOKEN=""
+        fi
     fi
 fi
 if [ -n "$TOKEN" ]; then
