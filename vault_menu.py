@@ -543,9 +543,34 @@ def show():
     vb.on_click(lambda _: in_background("backup", vlog, run_cmd, ["vault", "backup"], vlog))
     vs.on_click(lambda _: in_background("status", vlog, run_cmd, ["vault", "status"], vlog))
     vr.on_click(lambda _: in_background("restore", vlog, run_cmd, ["vault", "restore"], vlog))
+    # power controls: back up first, then ask Vast to stop/destroy this instance
+    pstop = W.Button(description="Backup & STOP", button_style="warning", icon="pause")
+    pdestroy = W.Button(description="Backup & DESTROY", button_style="danger", icon="trash")
+    pquick = W.Button(description="Stop now (no backup)", icon="power-off")
+    pconfirm = W.Checkbox(value=False, description="Yes, really destroy this instance", indent=False)
+
+    def power(mode, extra=None):
+        cmd = ["vault", "shutdown", mode] + ([extra] if extra else [])
+        vlog(f">>> {' '.join(cmd)} - keep this tab open until it says Vast accepted")
+        in_background("shutdown", vlog, run_cmd, cmd, vlog)
+
+    def on_destroy(_):
+        if not pconfirm.value:
+            vlog("Tick 'Yes, really destroy this instance' first.")
+            return
+        pconfirm.value = False
+        power("destroy")
+    pstop.on_click(lambda _: power("stop"))
+    pdestroy.on_click(on_destroy)
+    pquick.on_click(lambda _: power("stop", "--no-backup"))
+
     vault_tab = W.VBox([W.HBox([vb, vs, vr]),
                         W.HTML("<small>Backup saves models, nodes, workflows, input, output and Jupyter "
                                "settings to Cloudflare R2. Restore runs automatically on new instances.</small>"),
+                        W.HTML("<hr><b>Shut down this instance</b> &nbsp;<small>STOP keeps the disk (small storage "
+                               "charge, restart later on the same machine). DESTROY ends all charges; your files "
+                               "are safe in R2. Destroy only runs if the backup succeeds.</small>"),
+                        W.HBox([pstop, pdestroy, pconfirm]), pquick,
                         vlog.widget])
 
     # ---------- ComfyUI tab
