@@ -345,11 +345,15 @@ def restart_comfyui(log):
 
 
 # ----------------------------------------------------------------------------- Outputs
+PLACEHOLDER = re.compile(r"^(_.*_will_be_put_here|put_.*_here)$")   # ComfyUI's empty marker files
+
+
 def output_files():
     if not OUTPUT.exists():
         return []
     return sorted(p for p in OUTPUT.rglob("*")
-                  if p.is_file() and not any(part.startswith(".") for part in p.relative_to(OUTPUT).parts))
+                  if p.is_file() and not PLACEHOLDER.match(p.name)
+                  and not any(part.startswith(".") for part in p.relative_to(OUTPUT).parts))
 
 
 def downloaded_set():
