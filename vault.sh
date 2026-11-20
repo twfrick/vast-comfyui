@@ -141,6 +141,11 @@ cmd_backup() {
             rc copy "$WORKSPACE/.jupyter" "$REMOTE/jupyter"
         fi
     fi
+    if [ -d "$WORKSPACE/logs" ]; then
+        # logs of this instance, kept in R2 so you can see what happened after it is gone
+        "$RCLONE" copy "$WORKSPACE/logs" "$REMOTE/logs/$(date +%Y-%m-%d)_$(envget CONTAINER_ID)" \
+            -q 2>/dev/null || true
+    fi
     for d in $KEEP_DIRS; do
         [ -d "$COMFY/$d" ] || continue
         log "Backing up $d (never deleted in R2)"
