@@ -14,7 +14,7 @@ set -Eeuo pipefail
 REPO="${VAULT_REPO:-twfrick/vast-comfyui}"   # GitHub user/repo with the scripts
 BRANCH="${VAULT_BRANCH:-main}"
 DEST="/opt/vault"
-FILES="statuspage.py cftunnel.sh install_comfyui.sh vault.sh vault_menu.py ComfyUI-Menu.ipynb"
+FILES="statuspage.py cftunnel.sh install_comfyui.sh vault.sh vault_menu.py ComfyUI-Menu.ipynb watcher.py"
 
 mkdir -p "$DEST" /workspace/logs
 exec > >(tee -a /workspace/logs/provision.log) 2>&1
@@ -68,5 +68,26 @@ cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
 # JupyterLab can't open folders named "checkpoints" (bug) - give it a browsable shortcut
 ln -sfn /workspace/ComfyUI/models/checkpoints /workspace/checkpoints-view
 echo "Menu: open /workspace/ComfyUI-Menu.ipynb in JupyterLab"
+
+# Idle watcher + automatic backups (starts counting once setup is complete)
+cat > /opt/supervisor-scripts/watcher.sh <<'WEOF'
+#!/bin/bash
+exec /usr/bin/python3 /opt/vault/watcher.py
+WEOF
+chmod +x /opt/supervisor-scripts/watcher.sh
+cat > /etc/supervisor/conf.d/watcher.conf <<'WEOF'
+[program:watcher]
+command=/opt/supervisor-scripts/watcher.sh
+autostart=true
+autorestart=true
+startsecs=5
+stdout_logfile=/workspace/logs/watcher-service.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=1
+redirect_stderr=true
+WEOF
+supervisorctl reread >/dev/null && supervisorctl update >/dev/null
+supervisorctl restart watcher >/dev/null || true
+echo "Idle watcher: IDLE_MINUTES=${IDLE_MINUTES:-30} IDLE_ACTION=${IDLE_ACTION:-stop} AUTOBACKUP_MINUTES=${AUTOBACKUP_MINUTES:-15}"
 
 stage "PROVISION COMPLETE $(date)"
