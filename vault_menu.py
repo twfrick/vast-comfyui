@@ -69,9 +69,13 @@ def model_folders():
 
 
 class LogBox:
-    """Log panel that always shows the newest lines (sticks to the bottom as text arrives).
-    Safe to update from background threads."""
-    def __init__(self, height="260px"):
+    """Log panel; a small script (installed by show()) keeps it scrolled to the newest line
+    unless you scroll up to read. Safe to update from background threads."""
+    _count = 0
+
+    def __init__(self, height="480px"):
+        LogBox._count += 1
+        self.id = f"log{LogBox._count}"
         self.lines = []
         self.height = height
         self.widget = W.HTML(layout=W.Layout(width="100%"))
@@ -79,25 +83,44 @@ class LogBox:
 
     def _render(self):
         text = html.escape("\n".join(self.lines)) or "&nbsp;"
-        # column-reverse + flex-end: text starts at the top, and once the box is full
-        # the view stays pinned to the newest line
         self.widget.value = (
-            f"<div style='height:{self.height};overflow-y:auto;display:flex;flex-direction:column-reverse;"
-            f"justify-content:flex-end;overflow-anchor:none;"
-            f"border:1px solid var(--jp-border-color1);border-radius:4px;"
-            f"background:var(--jp-layout-color1);padding:6px'>"
+            f"<div class='vm-log' data-log='{self.id}' style='height:{self.height};overflow-y:auto;"
+            f"border:1px solid var(--jp-border-color1);border-radius:4px;background:var(--jp-layout-color1);"
+            f"padding:6px;scrollbar-width:auto'>"
             f"<pre style='margin:0;white-space:pre-wrap;font-size:12px;"
             f"color:var(--jp-content-font-color1)'>{text}</pre></div>")
 
     def __call__(self, msg=""):
         for line in str(msg).rstrip("\n").split("\n"):
             self.lines.append(line)
-        self.lines = self.lines[-400:]
+        self.lines = self.lines[-500:]
         self._render()
 
     def clear(self):
         self.lines = []
         self._render()
+
+
+# Each log update replaces the box, which would jump it back to the top. This script
+# remembers whether you were at the bottom and puts every new box back where it belongs.
+AUTOSCROLL_JS = """
+(() => {
+  if (window.__vmLogScroll) return;
+  window.__vmLogScroll = true;
+  const state = {};
+  const fix = el => {
+    if (el.__vmDone) return; el.__vmDone = true;
+    const id = el.dataset.log, s = state[id] || {stick: true, top: 0};
+    el.scrollTop = s.stick ? el.scrollHeight : s.top;
+    el.addEventListener('scroll', () => {
+      state[id] = {stick: el.scrollTop + el.clientHeight >= el.scrollHeight - 25, top: el.scrollTop};
+    });
+  };
+  new MutationObserver(() => document.querySelectorAll('.vm-log').forEach(fix))
+    .observe(document.body, {childList: true, subtree: true});
+  document.querySelectorAll('.vm-log').forEach(fix);
+})();
+"""
 
 
 def run_cmd(cmd, log, cwd=None, hide=None, on_line=None):
@@ -400,6 +423,36 @@ def browser_download(paths, js_out):
         display(Javascript(js))
 
 
+# ----------------------------------------------------------------------------- watcher
+WATCH_STATE = WORKSPACE / ".watcher.json"
+WATCH_PAUSE = WORKSPACE / ".watcher_pause"
+
+
+def fmt_min(sec):
+    sec = int(max(sec, 0))
+    return f"{sec // 3600}h {sec % 3600 // 60}m" if sec >= 3600 else f"{sec // 60}m"
+
+
+def watcher_summary():
+    try:
+        w = json.loads(WATCH_STATE.read_text())
+    except Exception:  # noqa: BLE001
+        return "Idle watcher: not running yet"
+    now = time.time()
+    if now - w.get("updated", 0) > 120:
+        return "<b style='color:#c62828'>Idle watcher: not running</b>"
+    act = w.get("action", "stop").upper()
+    if act == "OFF":
+        txt = "Auto-shutdown off"
+    elif w.get("reason"):
+        txt = f"Active ({html.escape(w['reason'])})"
+    else:
+        txt = f"<b>Idle {fmt_min(w.get('idle', 0))}</b> &rarr; {act} in {fmt_min(w.get('idle_limit', 0) - w.get('idle', 0))}"
+    if w.get("backup_every"):
+        txt += f" &nbsp;|&nbsp; next auto-backup in {fmt_min(w.get('next_backup', 0) - now)}"
+    return "Watcher: " + txt
+
+
 # ----------------------------------------------------------------------------- UI
 def show():
     style = {"description_width": "110px"}
@@ -421,7 +474,7 @@ def show():
                 f"<a href='{COMFY_URL}' target='_blank' style='font-size:16px'><b>&#9654; Open ComfyUI</b></a>"
                 f" &nbsp;|&nbsp; ComfyUI: {comfy} &nbsp;|&nbsp; GPU: {gpu}<br>"
                 f"Disk: {human(du.used)} used, <b>{human(du.free)} free</b> of {human(du.total)}"
-                f" &nbsp;|&nbsp; Last backup: {last}</div>")
+                f" &nbsp;|&nbsp; Last backup: {last}<br>{watcher_summary()}</div>")
     header = W.HTML(header_html())
     refresh = W.Button(description="Refresh", icon="refresh", layout=W.Layout(width="110px"))
     refresh.on_click(lambda _: setattr(header, "value", header_html()))
@@ -597,6 +650,28 @@ def show():
     pdestroy.on_click(on_destroy)
     pquick.on_click(lambda _: power("stop", "--no-backup"))
 
+    # keep-awake: stops the idle watcher from shutting down while you work without queueing jobs
+    kdur = W.Dropdown(options=[("1 hour", 1), ("2 hours", 2), ("4 hours", 4), ("8 hours", 8)], value=2,
+                      layout=W.Layout(width="110px"))
+    kbtn = W.Button(description="Keep awake", icon="coffee")
+    kres = W.Button(description="Cancel keep-awake", icon="times")
+
+    def on_keep(_):
+        until = time.time() + kdur.value * 3600
+        WATCH_PAUSE.write_text(str(until))
+        vlog.clear()
+        vlog(f"Keep-awake on: no idle shutdown until {time.strftime('%H:%M', time.localtime(until))} "
+             f"(auto-backups still run).")
+        header.value = header_html()
+
+    def on_resume(_):
+        WATCH_PAUSE.unlink(missing_ok=True)
+        vlog.clear()
+        vlog("Keep-awake cancelled: idle watcher is counting again.")
+        header.value = header_html()
+    kbtn.on_click(on_keep)
+    kres.on_click(on_resume)
+
     vault_tab = W.VBox([W.HBox([vb, vs, vr]),
                         W.HTML("<small>Backup saves models, nodes, workflows, input, output and Jupyter "
                                "settings to Cloudflare R2. Restore runs automatically on new instances.</small>"),
@@ -604,6 +679,10 @@ def show():
                                "charge, restart later on the same machine). DESTROY ends all charges; your files "
                                "are safe in R2. Destroy only runs if the backup succeeds.</small>"),
                         W.HBox([pstop, pdestroy, pconfirm]), pquick,
+                        W.HTML("<hr><b>Idle watcher</b> &nbsp;<small>Shuts down after the idle time with no "
+                               "ComfyUI jobs, downloads or Jupyter use. Use Keep awake while you build workflows "
+                               "without running them.</small>"),
+                        W.HBox([kdur, kbtn, kres]),
                         vlog.widget])
 
     # ---------- ComfyUI tab
@@ -628,4 +707,7 @@ def show():
     tabs = W.Tab(children=[models_tab, nodes_tab, outputs_tab, vault_tab, comfy_tab])
     for i, t in enumerate(["Models", "Nodes", "Outputs", "Vault", "ComfyUI"]):
         tabs.set_title(i, t)
-    display(W.VBox([W.HBox([header, refresh]), tabs]))
+    boot_out = W.Output()
+    display(W.VBox([W.HBox([header, refresh]), tabs, boot_out]))
+    with boot_out:
+        display(Javascript(AUTOSCROLL_JS))
