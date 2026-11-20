@@ -30,18 +30,27 @@ if [ -z "${R2_BUCKET:-}" ] && [ -f /etc/environment ]; then
     done
 fi
 
+REQUIRED="cftunnel.sh install_comfyui.sh vault.sh"   # setup can't work without these
 fetch() {   # GitHub API = always the newest file (no raw cache). Token avoids rate limits.
     local f="$1" url="https://api.github.com/repos/$REPO/contents/$1?ref=$BRANCH"
-    if [ -n "${GITHUB_TOKEN:-}" ] && curl -fsSL -H "Accept: application/vnd.github.raw" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" "$url" -o "$DEST/$f"; then
-        :
-    else
-        curl -fsSL --retry 3 -H "Accept: application/vnd.github.raw" "$url" -o "$DEST/$f"
+    if { [ -n "${GITHUB_TOKEN:-}" ] && curl -fsSL -H "Accept: application/vnd.github.raw" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" "$url" -o "$DEST/$f.new" 2>/dev/null; } \
+       || curl -fsSL --retry 3 -H "Accept: application/vnd.github.raw" "$url" -o "$DEST/$f.new"; then
+        mv -f "$DEST/$f.new" "$DEST/$f"; chmod +x "$DEST/$f"
+        echo "Downloaded $f"
+        return 0
     fi
-    chmod +x "$DEST/$f"
-    echo "Downloaded $f"
+    rm -f "$DEST/$f.new"
+    return 1
 }
-for f in $FILES; do fetch "$f"; done
+for f in $FILES; do
+    if ! fetch "$f"; then
+        case " $REQUIRED " in
+            *" $f "*) echo "ERROR: $f is missing from GitHub ($REPO) - cannot continue"; exit 1 ;;
+            *)        echo "WARNING: $f not found on GitHub - skipping it (upload it to $REPO)" ;;
+        esac
+    fi
+done
 
 # Host internet speed check (shown on the status page) - slow hosts make restores take hours
 SPEED=$(curl -s -o /dev/null --max-time 20 -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=50000000" || echo 0)
@@ -64,12 +73,13 @@ vault restore
 
 
 stage "Jupyter menu"
-cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
+[ -f "$DEST/ComfyUI-Menu.ipynb" ] && cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
 # JupyterLab can't open folders named "checkpoints" (bug) - give it a browsable shortcut
 ln -sfn /workspace/ComfyUI/models/checkpoints /workspace/checkpoints-view
 echo "Menu: open /workspace/ComfyUI-Menu.ipynb in JupyterLab"
 
 # Idle watcher + automatic backups (starts counting once setup is complete)
+if [ -f "$DEST/watcher.py" ]; then
 cat > /opt/supervisor-scripts/watcher.sh <<'WEOF'
 #!/bin/bash
 exec /usr/bin/python3 /opt/vault/watcher.py
@@ -89,5 +99,8 @@ WEOF
 supervisorctl reread >/dev/null && supervisorctl update >/dev/null
 supervisorctl restart watcher >/dev/null || true
 echo "Idle watcher: IDLE_MINUTES=${IDLE_MINUTES:-30} IDLE_ACTION=${IDLE_ACTION:-stop} AUTOBACKUP_MINUTES=${AUTOBACKUP_MINUTES:-15}"
+else
+echo "WARNING: watcher.py missing - NO idle shutdown or auto-backup on this instance"
+fi
 
 stage "PROVISION COMPLETE $(date)"
