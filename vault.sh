@@ -191,12 +191,18 @@ cmd_restore() {
         return 0
     fi
     "$RCLONE" cat "$REMOTE/.last_backup" 2>/dev/null | sed 's/^/Last backup: /' | tee -a "$LOG" || true
-    for d in $MIRROR_DIRS; do
+    # Small things first: Jupyter settings (then JupyterLab is fully usable), workflows,
+    # inputs and nodes; the big models come last.
+    log "Restoring Jupyter settings"
+    restore_dir jupyter "$WORKSPACE/.jupyter"
+    if supervisorctl status labvault >/dev/null 2>&1; then
+        supervisorctl restart labvault >/dev/null || true
+        log "JupyterLab ready with your settings (models still restoring)"
+    fi
+    for d in user input custom_nodes models; do
         log "Restoring $d"
         restore_dir "$d" "$COMFY/$d"
     done
-    log "Restoring Jupyter settings"
-    restore_dir jupyter "$WORKSPACE/.jupyter"
     if [ "$RESTORE_OUTPUT" = "1" ]; then
         log "Restoring output"
         restore_dir output "$COMFY/output"
@@ -204,7 +210,6 @@ cmd_restore() {
     install_node_requirements
     touch "$MARKER"
     restart_comfyui
-    if supervisorctl status labvault >/dev/null 2>&1; then supervisorctl restart labvault >/dev/null || true; fi
     log "===== RESTORE COMPLETE ====="
 }
 
