@@ -258,12 +258,18 @@ small{color:#888}label{color:#aaa;font-size:13px;margin-left:12px}</style></head
 <pre id="log">loading...</pre>
 <script>
 const $ = id => document.getElementById(id);
+let lastOk = Date.now(), lastBanner = '';
 async function tick() {
   if ($('pause').checked) return;
   try {
-    const d = await (await fetch('data', {cache: 'no-store'})).json();
-    for (const k of ['banner', 'steps', 'links']) $(k).innerHTML = d[k];
-    $('updated').textContent = d.updated;
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 8000);
+    const resp = await fetch('data', {cache: 'no-store', signal: ctl.signal});
+    clearTimeout(t);
+    const d = await resp.json();          // a stopped instance returns Cloudflare's error page -> throws
+    lastOk = Date.now();
+    for (const k of ['steps', 'links']) $(k).innerHTML = d[k];
+    $('banner').innerHTML = lastBanner = d.banner;
+    $('updated').textContent = d.updated + ' · page updated ' + new Date().toLocaleTimeString();
     document.title = d.title + ' - Vast ComfyUI';
     const log = $('log'), atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     if (log.textContent !== d.log) {
@@ -272,7 +278,15 @@ async function tick() {
       log.scrollTop = ($('follow').checked && atBottom) || log.dataset.first !== '1' ? log.scrollHeight : keep;
       log.dataset.first = '1';
     }
-  } catch (e) { $('updated').textContent = 'connection lost - retrying...'; }
+  } catch (e) {
+    const secs = Math.round((Date.now() - lastOk) / 1000);
+    if (secs >= 15) {
+      $('banner').innerHTML = "<div class='b bad'>Can't reach the instance (no answer for " + secs +
+        " s) &mdash; it has probably stopped or been destroyed. Check Vast's Instances page.</div>";
+      document.title = 'UNREACHABLE - Vast ComfyUI';
+    }
+    $('updated').textContent = 'connection lost - retrying... (last good update ' + new Date(lastOk).toLocaleTimeString() + ')';
+  }
 }
 tick(); setInterval(tick, 5000);
 </script></body></html>"""
