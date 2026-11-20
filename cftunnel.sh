@@ -60,11 +60,13 @@ source $VENV/bin/activate
 export JUPYTERLAB_SETTINGS_DIR=$WORKSPACE/.jupyter/lab/user-settings
 export JUPYTERLAB_WORKSPACES_DIR=$WORKSPACE/.jupyter/lab/workspaces
 export SHELL=/bin/bash
+export VAULT_LAB=1          # lets the menu show "Tunnel JupyterLab"
 cd $WORKSPACE
 exec jupyter lab --no-browser --allow-root --ip=127.0.0.1 --port=$LAB_PORT \\
     --IdentityProvider.token= --ServerApp.password= \\
     --ServerApp.allow_remote_access=True --ServerApp.allow_origin='*' --ServerApp.trust_xheaders=True \\
-    --ServerApp.root_dir=/ --ServerApp.preferred_dir=$WORKSPACE --ServerApp.default_url=/lab
+    --ServerApp.root_dir=/ --ServerApp.preferred_dir=$WORKSPACE --ServerApp.default_url=/lab \\
+    --LabApp.app_name="Vault Lab"
 EOF
 chmod +x /opt/supervisor-scripts/labvault.sh
 
