@@ -117,36 +117,72 @@ def speed_line(run):
 WATCH = Path("/workspace/.watcher.json")
 
 
-def watcher_line():
-    """One line about the idle watcher + auto-backup (from /workspace/.watcher.json)."""
+def fmt_min(sec):
+    """Whole minutes only (the watcher updates every 30 s): '<1 min', '7 min', '1 h 05 min'."""
+    m = int(max(sec, 0) // 60)
+    if m < 1:
+        return "&lt;1 min"
+    return f"{m // 60} h {m % 60:02d} min" if m >= 60 else f"{m} min"
+
+
+def watcher_block():
+    """(banner_override or None, html) for the idle watcher + auto-backup."""
     try:
         w = json.loads(WATCH.read_text())
     except Exception:  # noqa: BLE001
-        return ""
+        return None, ""
     now = time.time()
     if now - w.get("updated", 0) > 120:
-        return "<div class='st'>&#9888;&#65039; Idle watcher is not running</div>"
+        return None, "<div class='st'>&#9888;&#65039; Idle watcher is not responding</div>"
     act = w.get("action", "stop").upper()
+    state = w.get("state", "")
+    task, prog, pct = w.get("task", ""), w.get("progress", ""), w.get("pct")
+    bar = (f"<div class='bar'><div style='width:{pct}%'></div></div>" if pct is not None else "")
+    work = ""
+    if task or prog:
+        work = (f"<div class='prog'><b>{task or 'Working'}</b>"
+                f"{' &nbsp;&middot;&nbsp; ' + str(pct) + '% &nbsp;&middot;&nbsp; ' + prog if prog else ''}{bar}</div>")
+    banner = None
+    if state == "shutting down":
+        banner = f"<div class='b wait'>Idle {fmt_min(w.get('idle', 0))} &mdash; backing up, then {act}&hellip;</div>"
+    elif state == "stopping":
+        banner = f"<div class='b ok'>Backup done &mdash; Vast is {'stopping' if act == 'STOP' else 'destroying'} this instance</div>"
+
     parts = []
-    if w.get("state", "").startswith("shutting"):
-        parts.append(f"<b>Shutting down ({act})&hellip;</b>")
+    if state == "backing up":
+        parts.append("<b>Auto-backup running</b>")
+    elif state in ("shutting down", "stopping"):
+        pass
     elif act == "OFF":
         parts.append("Auto-shutdown off")
     elif w.get("reason"):
         parts.append(f"Active &mdash; {w['reason']}")
     else:
-        left = max(w.get("idle_limit", 0) - w.get("idle", 0), 0)
-        parts.append(f"<b>Idle {fmt_secs(w.get('idle', 0))}</b> &mdash; {act} in {fmt_secs(left)}")
-    if w.get("backup_every"):
-        if w.get("state") == "backing up":
-            parts.append("auto-backup running")
-        else:
-            parts.append(f"next auto-backup in {fmt_secs(max(w.get('next_backup', 0) - now, 0))}")
-    ok = w.get("last_backup_ok")
-    if ok is not None:
+        parts.append(f"<b>Idle {fmt_min(w.get('idle', 0))}</b> &mdash; {act} in "
+                     f"{fmt_min(w.get('idle_limit', 0) - w.get('idle', 0))}")
+    if w.get("backup_every") and state not in ("backing up", "shutting down", "stopping"):
+        parts.append(f"next auto-backup in {fmt_min(max(w.get('next_backup', 0) - now, 0))}")
+    if w.get("last_backup_ok") is not None:
         when = time.strftime("%H:%M", time.localtime(w.get("last_backup", 0)))
-        parts.append(f"last auto-backup {when} {'&#9989;' if ok else '&#10060; FAILED'}")
-    return "<div class='st'>&#128337; " + " &nbsp;&middot;&nbsp; ".join(parts) + "</div>"
+        parts.append(f"last backup {when} {'&#9989;' if w['last_backup_ok'] else '&#10060;'}")
+    line = "<div class='st'>&#128337; " + " &nbsp;&middot;&nbsp; ".join(parts) + "</div>" if parts else ""
+    note = f"<div class='b bad' style='font-size:15px'>{w['note']}</div>" if w.get("note") else ""
+    return banner, note + line + work
+
+
+VAULT_LOG = Path("/workspace/logs/vault.log")
+
+
+def log_text(run):
+    """Setup log normally; the backup log while the watcher is backing up / shutting down."""
+    try:
+        w = json.loads(WATCH.read_text())
+        if w.get("state") in ("backing up", "shutting down", "stopping") and VAULT_LOG.exists():
+            lines = VAULT_LOG.read_text(errors="ignore").splitlines()
+            return "--- backup log (vault.log) ---\n" + "\n".join(lines[-200:])
+    except Exception:  # noqa: BLE001
+        pass
+    return "\n".join(run.splitlines()[-200:]) or "(no log yet)"
 
 
 def status():
@@ -174,6 +210,7 @@ def status():
             icon = "&#11036;"
         rows.append(f"<div class='st'>{icon} {label}{took}</div>")
 
+    w_banner, w_html = watcher_block() if done else (None, "")
     if failed:
         banner, cls = "Setup FAILED - see the log below", "bad"
     elif done and comfy_ok:
@@ -191,10 +228,10 @@ def status():
         updated = f"Log last updated {mins} min ago" if mins else "Log updated just now"
     return {
         "title": "READY" if (done and comfy_ok) else ("FAILED" if failed else "Setting up"),
-        "banner": f"<div class='b {cls}'>{banner}</div>",
-        "steps": speed_line(run) + "".join(rows) + restore_progress(run) + (watcher_line() if done else ""),
+        "banner": w_banner or f"<div class='b {cls}'>{banner}</div>",
+        "steps": speed_line(run) + "".join(rows) + restore_progress(run) + w_html,
         "links": links, "updated": updated,
-        "log": "\n".join(run.splitlines()[-200:]) or "(no log yet)",
+        "log": log_text(run),
     }
 
 
