@@ -470,7 +470,11 @@ def show():
             comfy = "<b style='color:#2e7d32'>running</b>"
         except Exception:  # noqa: BLE001
             comfy = "<b style='color:#c62828'>not running</b>"
-        return (f"<div style='font-size:14px;line-height:1.6'>"
+        where = ("<span style='background:#2e7d32;color:#fff;padding:1px 8px;border-radius:4px'>"
+                 "Tunnel JupyterLab (jupyter.centarione.org)</span>" if os.environ.get("VAULT_LAB")
+                 else "<span style='background:#ef6c00;color:#fff;padding:1px 8px;border-radius:4px'>"
+                      "Vast's Jupyter (backup way in)</span>")
+        return (f"<div style='font-size:14px;line-height:1.6'>{where}<br>"
                 f"<a href='{COMFY_URL}' target='_blank' style='font-size:16px'><b>&#9654; Open ComfyUI</b></a>"
                 f" &nbsp;|&nbsp; ComfyUI: {comfy} &nbsp;|&nbsp; GPU: {gpu}<br>"
                 f"Disk: {human(du.used)} used, <b>{human(du.free)} free</b> of {human(du.total)}"
