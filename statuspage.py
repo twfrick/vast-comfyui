@@ -114,6 +114,41 @@ def speed_line(run):
     return f"<div class='st'>&#128246; Host download speed: <b>{mb} MB/s</b></div>"
 
 
+WATCH = Path("/workspace/.watcher.json")
+
+
+def watcher_line():
+    """One line about the idle watcher + auto-backup (from /workspace/.watcher.json)."""
+    try:
+        w = json.loads(WATCH.read_text())
+    except Exception:  # noqa: BLE001
+        return ""
+    now = time.time()
+    if now - w.get("updated", 0) > 120:
+        return "<div class='st'>&#9888;&#65039; Idle watcher is not running</div>"
+    act = w.get("action", "stop").upper()
+    parts = []
+    if w.get("state", "").startswith("shutting"):
+        parts.append(f"<b>Shutting down ({act})&hellip;</b>")
+    elif act == "OFF":
+        parts.append("Auto-shutdown off")
+    elif w.get("reason"):
+        parts.append(f"Active &mdash; {w['reason']}")
+    else:
+        left = max(w.get("idle_limit", 0) - w.get("idle", 0), 0)
+        parts.append(f"<b>Idle {fmt_secs(w.get('idle', 0))}</b> &mdash; {act} in {fmt_secs(left)}")
+    if w.get("backup_every"):
+        if w.get("state") == "backing up":
+            parts.append("auto-backup running")
+        else:
+            parts.append(f"next auto-backup in {fmt_secs(max(w.get('next_backup', 0) - now, 0))}")
+    ok = w.get("last_backup_ok")
+    if ok is not None:
+        when = time.strftime("%H:%M", time.localtime(w.get("last_backup", 0)))
+        parts.append(f"last auto-backup {when} {'&#9989;' if ok else '&#10060; FAILED'}")
+    return "<div class='st'>&#128337; " + " &nbsp;&middot;&nbsp; ".join(parts) + "</div>"
+
+
 def status():
     """Current state as a dict (sent to the page as JSON every few seconds)."""
     run = current_run()
@@ -157,7 +192,8 @@ def status():
     return {
         "title": "READY" if (done and comfy_ok) else ("FAILED" if failed else "Setting up"),
         "banner": f"<div class='b {cls}'>{banner}</div>",
-        "steps": speed_line(run) + "".join(rows) + restore_progress(run), "links": links, "updated": updated,
+        "steps": speed_line(run) + "".join(rows) + restore_progress(run) + (watcher_line() if done else ""),
+        "links": links, "updated": updated,
         "log": "\n".join(run.splitlines()[-200:]) or "(no log yet)",
     }
 
