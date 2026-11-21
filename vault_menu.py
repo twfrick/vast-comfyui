@@ -718,7 +718,11 @@ def show():
 
     vault_tab = W.VBox([W.HBox([vb, vs, vr]),
                         W.HTML("<small>Backup saves models, nodes, workflows, input, output and Jupyter "
-                               "settings to Cloudflare R2. Restore runs automatically on new instances.</small>"),
+                               "settings to Cloudflare R2. Restore runs automatically on new instances. "
+                               "This panel shows the last 500 lines &mdash; full logs: "
+                               "<a href='/files/workspace/logs/vault.log?download=1' target='_blank'>backup/restore log</a>, "
+                               "<a href='/files/workspace/logs/provision.log?download=1' target='_blank'>setup log</a>"
+                               "</small>"),
                         W.HTML("<hr><b>R2 trash</b> &nbsp;<small>Files a backup removed from the vault are "
                                "kept here. Put them back, then use Restore (or start a new instance).</small>"),
                         W.HBox([vt, vtd, vtf, vu]),
