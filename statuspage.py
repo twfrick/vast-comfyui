@@ -177,12 +177,40 @@ def log_text(run):
     """Setup log normally; the backup log while the watcher is backing up / shutting down."""
     try:
         w = json.loads(WATCH.read_text())
-        if w.get("state") in ("backing up", "shutting down", "stopping") and VAULT_LOG.exists():
+        busy = w.get("state") in ("backing up", "shutting down", "stopping") or (w.get("reason") or "").startswith("Backup/restore")
+        if busy and VAULT_LOG.exists():
             lines = VAULT_LOG.read_text(errors="ignore").splitlines()
             return "--- backup log (vault.log) ---\n" + "\n".join(lines[-200:])
     except Exception:  # noqa: BLE001
         pass
     return "\n".join(run.splitlines()[-200:]) or "(no log yet)"
+
+
+VAULT_STEP = re.compile(r"(Backing up .*|Restoring \S+|Asking Vast to .*|Vast accepted.*|WARNING: .*|ERROR: .*)")
+VAULT_STATS = re.compile(r"NOTICE:\s+([\d.]+\s*\w+) / ([\d.]+\s*\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
+
+
+def vault_job():
+    """A backup/restore/shutdown started from the menu or terminal: (title, html) or None."""
+    import subprocess
+    p = subprocess.run(["pgrep", "-af", r"vault(\.sh)? (backup|restore|shutdown)"], capture_output=True, text=True)
+    jobs = [ln for ln in p.stdout.splitlines() if "pgrep" not in ln]
+    if not jobs:
+        return None
+    kind = "Shutdown" if "shutdown" in jobs[0] else ("Restore" if "restore" in jobs[0] else "Backup")
+    step, prog = "", ""
+    if VAULT_LOG.exists():
+        for ln in VAULT_LOG.read_text(errors="ignore").splitlines()[-300:]:
+            m = VAULT_STEP.search(ln)
+            if m:
+                step, prog = m.group(1).replace("=", "").strip(), ""
+            m = VAULT_STATS.search(ln)
+            if m:
+                d, t, pct, sp, eta = m.groups()
+                prog = (f" &nbsp;&middot;&nbsp; {pct}% &nbsp;&middot;&nbsp; {d.replace('i', '')} of {t.replace('i', '')}"
+                        f" &nbsp;&middot;&nbsp; {sp.replace('i', '')} &nbsp;&middot;&nbsp; ETA {eta}"
+                        f"<div class='bar'><div style='width:{pct}%'></div></div>")
+    return kind, f"<div class='prog'><b>{kind} running</b> &mdash; {step or 'starting'}{prog}</div>"
 
 
 def status():
@@ -211,6 +239,11 @@ def status():
         rows.append(f"<div class='st'>{icon} {label}{took}</div>")
 
     w_banner, w_html = watcher_block() if done else (None, "")
+    job = vault_job() if done else None
+    if job and "class='prog'" not in w_html:
+        w_html += job[1]
+        if job[0] == "Shutdown" and not w_banner:
+            w_banner = "<div class='b wait'>Shutting down from the menu &mdash; backing up first&hellip;</div>"
     if "RESTORE FAILED" in run:
         banner, cls = ("RESTORE FAILED &mdash; your R2 vault was NOT changed. Destroy this instance and "
                        "rent another host (or run <code>vault restore</code> in the terminal)."), "bad"
