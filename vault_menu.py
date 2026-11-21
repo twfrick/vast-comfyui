@@ -410,6 +410,7 @@ def restart_comfyui(log):
 
 # ----------------------------------------------------------------------------- Model cleanup
 MODEL_SKIP = re.compile(r"(\.partial|\.aria2|\.tmp)$")
+MODEL_HIDE_FOLDERS = {"configs"}   # ComfyUI's built-in .yaml model configs - not models, keep them
 
 
 def model_files():
@@ -419,7 +420,8 @@ def model_files():
     out = []
     for p in MODELS.rglob("*"):
         rel = p.relative_to(MODELS).parts
-        if any(part.startswith(".") for part in rel) or "__pycache__" in rel:
+        if any(part.startswith(".") for part in rel) or "__pycache__" in rel \
+                or (len(rel) > 1 and rel[0] in MODEL_HIDE_FOLDERS):
             continue
         if not p.is_file() or PLACEHOLDER.match(p.name) or MODEL_SKIP.search(p.name):
             continue
