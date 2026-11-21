@@ -64,28 +64,29 @@ fi
 stage "Cloudflare Tunnel + JupyterLab + status page"
 bash "$DEST/cftunnel.sh" || echo "WARNING: tunnel setup had problems - see /workspace/logs/cftunnel_setup.log"
 
+# Jupyter settings + menu right away (small) - usable while ComfyUI installs and models download
+stage "Jupyter settings + menu"
+bash "$DEST/vault.sh" setup
+export VAULT_PROVISIONING=1
+vault restore jupyter || echo "WARNING: could not restore Jupyter settings (continuing)"
+[ -f "$DEST/ComfyUI-Menu.ipynb" ] && cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
+# JupyterLab can't open folders named "checkpoints" (bug) - give it a browsable shortcut
+ln -sfn /workspace/ComfyUI/models/checkpoints /workspace/checkpoints-view
+echo "Menu ready: open /workspace/ComfyUI-Menu.ipynb in JupyterLab (ComfyUI still installing)"
+
 stage "Installing ComfyUI"
 bash "$DEST/install_comfyui.sh"
 
 stage "Restoring vault from R2"
-bash "$DEST/vault.sh" setup
-# Restore - retried once (slow hosts sometimes drop R2 connections). A failed restore never
-# changes your R2 vault; the instance just stays in safe mode (backups copy only).
+# Workflows, inputs, nodes, then models. Retried once (slow hosts sometimes drop R2
+# connections). A failed restore never changes your R2 vault (backups stay copy-only).
 RESTORE_FAILED=0
-export VAULT_PROVISIONING=1
-if ! vault restore; then
+if ! vault restore --skip-jupyter; then
     echo "Restore had a problem - retrying in 20 s..."
     sleep 20
-    vault restore || RESTORE_FAILED=1
+    vault restore --skip-jupyter || RESTORE_FAILED=1
 fi
 [ "$RESTORE_FAILED" = 1 ] && echo "RESTORE FAILED - your R2 vault was NOT changed. Destroy this instance and try another host (or run: vault restore)"
-
-
-stage "Jupyter menu"
-[ -f "$DEST/ComfyUI-Menu.ipynb" ] && cp -f "$DEST/ComfyUI-Menu.ipynb" /workspace/ComfyUI-Menu.ipynb
-# JupyterLab can't open folders named "checkpoints" (bug) - give it a browsable shortcut
-ln -sfn /workspace/ComfyUI/models/checkpoints /workspace/checkpoints-view
-echo "Menu: open /workspace/ComfyUI-Menu.ipynb in JupyterLab"
 
 # Idle watcher + automatic backups (starts counting once setup is complete)
 if [ -f "$DEST/watcher.py" ]; then
