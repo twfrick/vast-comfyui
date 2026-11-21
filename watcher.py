@@ -94,6 +94,19 @@ def comfy_busy():
         return ""
 
 
+COMFY_ACTIVITY = WS / ".comfy_activity"
+
+
+def comfy_ui_recent(limit_sec):
+    """Someone clicked/typed/moved windows in ComfyUI recently (ComfyUI-VaultActivity extension)."""
+    try:
+        if time.time() - COMFY_ACTIVITY.stat().st_mtime < limit_sec:
+            return "ComfyUI in use (editing)"
+    except OSError:
+        pass
+    return ""
+
+
 def gpu_busy():
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
@@ -209,8 +222,8 @@ def main():
         reason = ""
         if not provisioning_done():
             reason = "Setup still running"
-        reason = reason or comfy_busy() or menu_busy() or vault_locked() or gpu_busy() \
-            or jupyter_recent(CHECK_EVERY * 2 + 5)
+        reason = reason or comfy_busy() or comfy_ui_recent(CHECK_EVERY * 2 + 15) or menu_busy() \
+            or vault_locked() or gpu_busy() or jupyter_recent(CHECK_EVERY * 2 + 5)
         pause_end = paused_until()
         if pause_end > now:
             reason = reason or f"Keep-awake until {dt.datetime.fromtimestamp(pause_end):%H:%M}"
