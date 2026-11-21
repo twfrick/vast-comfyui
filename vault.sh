@@ -6,6 +6,8 @@
 #   vault backup    copy models, custom_nodes, workflows, input, output -> R2
 #   vault restore   copy everything back from R2 + reinstall node requirements
 #   vault status    show local vs R2 sizes and last backup time
+#   vault trash     list files that backups moved to R2 trash
+#   vault undelete <date> [folder]   put trash back into the vault
 #   vault shutdown stop|destroy [--no-backup]   back up, then stop or destroy this instance
 #
 # Saved in R2 (bucket $R2_BUCKET):
@@ -99,6 +101,65 @@ restart_comfyui() {
 }
 
 # -----------------------------------------------------------------------------
+# R2 safety helpers - an R2 *error* is never treated as "empty"
+remote_state() {   # path -> prints data|empty ; exits on any other error
+    local out code
+    out=$("$RCLONE" lsf "$1" --max-depth 1 2>/tmp/vault_lsf.err) && code=0 || code=$?
+    if [ "$code" -eq 0 ]; then
+        if [ -n "$out" ]; then echo data; else echo empty; fi
+        return 0
+    fi
+    if [ "$code" -eq 3 ] || grep -qi "directory not found" /tmp/vault_lsf.err; then
+        echo empty; return 0
+    fi
+    log "ERROR: could not read R2 ($1): $(head -c 300 /tmp/vault_lsf.err | tr '\n' ' ')" >&2
+    exit 1
+}
+
+bytes_of() {   # rclone path -> total bytes (exits on error)
+    "$RCLONE" size "$1" --json "${EXCLUDES[@]}" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["bytes"])' \
+        || { log "ERROR: could not measure $1" >&2; exit 1; }
+}
+
+would_remove() {   # local remote -> "files bytes" that are in R2 but not on this instance
+    "$RCLONE" lsf -R --files-only --format sp "$2" "${EXCLUDES[@]}" > /tmp/vault_r.txt 2>/dev/null || return 1
+    "$RCLONE" lsf -R --files-only --format p  "$1" "${EXCLUDES[@]}" > /tmp/vault_l.txt 2>/dev/null || return 1
+    python3 - <<'PY'
+local = set(open('/tmp/vault_l.txt').read().splitlines())
+n = b = 0
+for line in open('/tmp/vault_r.txt'):
+    size, _, path = line.rstrip('\n').partition(';')
+    if path not in local:
+        n += 1
+        b += int(size or 0)
+print(n, b)
+PY
+}
+
+MAX_DEL_FILES="${VAULT_MAX_DELETE_FILES:-25}"
+MAX_DEL_GB="${VAULT_MAX_DELETE_GB:-5}"
+
+mirror_or_copy() {   # local remote trash-dir allow-delete(0/1)
+    # Mirror (sync) only when it is safe: a restore ran on this instance AND the files that
+    # would leave R2 are few/small. Otherwise copy only and warn - nothing disappears from R2.
+    local st n b gb
+    if [ ! -f "$MARKER" ]; then rc copy "$1" "$2"; return; fi
+    st=$(remote_state "$2") || exit 1
+    if [ "$st" = empty ]; then rc copy "$1" "$2"; return; fi
+    read -r n b < <(would_remove "$1" "$2" || echo "999999 0")
+    gb=$(awk -v b="$b" 'BEGIN{printf "%.1f", b/1073741824}')
+    if [ "$4" != "1" ] && { [ "$n" -gt "$MAX_DEL_FILES" ] || awk -v g="$gb" -v m="$MAX_DEL_GB" 'BEGIN{exit !(g>m)}'; }; then
+        log "WARNING: backup would remove $n file(s) ($gb GB) from R2 ($(basename "$2")) that are not on this instance."
+        log "WARNING: kept them in R2 (copy only). If you really deleted them, run: vault backup --allow-delete"
+        rc copy "$1" "$2"
+        return
+    fi
+    [ "$n" -gt 0 ] && log "  $n file(s) ($gb GB) you deleted here move to R2 trash"
+    rc sync "$1" "$2" --backup-dir "$3"
+}
+
+# -----------------------------------------------------------------------------
 cmd_setup() {
     ensure_rclone
     "$RCLONE" version | head -1
@@ -116,30 +177,22 @@ cmd_setup() {
     log "SETUP OK - R2 works. You can now use: vault backup | vault restore | vault status"
 }
 
-cmd_backup() {
+cmd_backup() {   # [--allow-delete]
     ensure_rclone; load_env; need_comfy; take_lock
-    local stamp d; stamp=$(date '+%Y-%m-%d_%H%M%S')
+    local stamp d allow=0; stamp=$(date '+%Y-%m-%d_%H%M%S')
+    [ "${1:-}" = "--allow-delete" ] && allow=1
     log "===== BACKUP started ====="
     if [ ! -f "$MARKER" ]; then
-        log "NOTE: no restore done on this instance yet - using safe mode (nothing deleted in R2)"
+        log "NOTE: no complete restore on this instance - safe mode (nothing removed from R2)"
     fi
     for d in $MIRROR_DIRS; do
         [ -d "$COMFY/$d" ] || continue
         log "Backing up $d"
-        if [ -f "$MARKER" ]; then
-            # Mirror: files you deleted locally are moved to R2 trash, not destroyed
-            rc sync "$COMFY/$d" "$REMOTE/$d" --backup-dir "$TRASH/$stamp/$d"
-        else
-            rc copy "$COMFY/$d" "$REMOTE/$d"
-        fi
+        mirror_or_copy "$COMFY/$d" "$REMOTE/$d" "$TRASH/$stamp/$d" "$allow"
     done
     if [ -d "$WORKSPACE/.jupyter" ]; then
         log "Backing up Jupyter settings"
-        if [ -f "$MARKER" ]; then
-            rc sync "$WORKSPACE/.jupyter" "$REMOTE/jupyter" --backup-dir "$TRASH/$stamp/jupyter"
-        else
-            rc copy "$WORKSPACE/.jupyter" "$REMOTE/jupyter"
-        fi
+        mirror_or_copy "$WORKSPACE/.jupyter" "$REMOTE/jupyter" "$TRASH/$stamp/jupyter" "$allow"
     fi
     if [ -d "$WORKSPACE/logs" ]; then
         # logs of this instance, kept in R2 so you can see what happened after it is gone
@@ -176,20 +229,27 @@ install_node_requirements() {
     done
 }
 
-restore_dir() {   # remote-subdir local-dir   (skips if nothing in R2)
+restore_dir() {   # remote-subdir local-dir  (fails loudly; verifies size)
+    local st r l
     mkdir -p "$2"
-    if "$RCLONE" lsf "$REMOTE/$1" --max-depth 1 2>/dev/null | head -1 | grep -q .; then
-        rc copy "$REMOTE/$1" "$2"
-    else
-        log "  (nothing in R2 for $1)"
+    st=$(remote_state "$REMOTE/$1") || exit 1
+    if [ "$st" = empty ]; then log "  (nothing in R2 for $1)"; return 0; fi
+    rc copy "$REMOTE/$1" "$2"
+    r=$(bytes_of "$REMOTE/$1") || exit 1
+    l=$(bytes_of "$2") || exit 1
+    if [ "$l" -lt "$r" ]; then
+        log "ERROR: $1 restore incomplete: $l of $r bytes. NOT marking this instance as restored."
+        exit 1
     fi
+    log "  $1 verified ($(awk -v b="$r" 'BEGIN{printf "%.2f GB", b/1073741824}'))"
 }
 
 cmd_restore() {
     ensure_rclone; load_env; need_comfy; take_lock
     local d
     log "===== RESTORE started ====="
-    if [ -z "$("$RCLONE" lsf "$REMOTE" --max-depth 1 2>/dev/null | head -1 || true)" ]; then
+    local top; top=$(remote_state "$REMOTE") || exit 1
+    if [ "$top" = empty ]; then
         log "R2 has no backup yet (first run) - nothing to restore"
         touch "$MARKER"
         log "===== RESTORE COMPLETE (nothing to restore) ====="
@@ -238,6 +298,34 @@ cmd_status() {
     df -h "$WORKSPACE" | awk 'NR==2 {print "  Disk: " $3 " used of " $2 " (" $4 " free)"}'
 }
 
+cmd_trash() {   # list what is in R2 trash
+    ensure_rclone; load_env
+    local st t d
+    st=$(remote_state "$TRASH") || exit 1
+    [ "$st" = empty ] && { echo "R2 trash is empty."; return 0; }
+    echo "R2 trash (files removed by backups - restore with: vault undelete <date> [folder]):"
+    for t in $("$RCLONE" lsf "$TRASH" --dirs-only | tr -d '/'); do
+        echo "  $t"
+        for d in $("$RCLONE" lsf "$TRASH/$t" --dirs-only | tr -d '/'); do
+            printf "      %-14s %s\n" "$d" "$("$RCLONE" size "$TRASH/$t/$d" 2>/dev/null | grep 'Total size' | sed 's/Total size: //')"
+        done
+    done
+}
+
+cmd_undelete() {   # <date> [folder]  -> copy trash back into the vault (keeps the trash copy)
+    ensure_rclone; load_env; take_lock
+    local t="${1:-}" only="${2:-}" d st
+    [ -n "$t" ] || die "Usage: vault undelete <date-from-vault-trash> [models|custom_nodes|user|input|jupyter]"
+    st=$(remote_state "$TRASH/$t") || exit 1
+    [ "$st" = data ] || die "Nothing in R2 trash for '$t' - run: vault trash"
+    for d in $("$RCLONE" lsf "$TRASH/$t" --dirs-only | tr -d '/'); do
+        [ -n "$only" ] && [ "$d" != "$only" ] && continue
+        log "Putting back $d from trash $t"
+        rc copy "$TRASH/$t/$d" "$REMOTE/$d" --ignore-existing
+    done
+    log "Done. Run 'vault restore' (or start a new instance) to get the files onto an instance."
+}
+
 # -----------------------------------------------------------------------------
 envget() {   # value from environment, else /etc/environment
     local k="$1"
@@ -283,9 +371,11 @@ cmd_shutdown() {   # stop|destroy [--no-backup]
 CMD="${1:-}"
 case "$CMD" in
     setup)   cmd_setup ;;
-    backup)  cmd_backup ;;
+    backup)  cmd_backup "${2:-}" ;;
+    trash)   cmd_trash ;;
+    undelete) cmd_undelete "${2:-}" "${3:-}" ;;
     restore) cmd_restore ;;
     status)  cmd_status ;;
     shutdown) cmd_shutdown "${2:-}" "${3:-}" ;;
-    *) echo "Usage: vault setup | backup | restore | status | shutdown stop|destroy [--no-backup]"; exit 1 ;;
+    *) echo "Usage: vault setup | backup [--allow-delete] | restore | status | trash | undelete <date> [folder] | shutdown stop|destroy [--no-backup]"; exit 1 ;;
 esac
