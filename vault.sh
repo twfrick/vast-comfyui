@@ -100,8 +100,8 @@ need_comfy() { [ -d "$COMFY" ] || die "ComfyUI not found at $COMFY - run install
 rc() { "$RCLONE" "$@" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" 2>&1 | tee -a "$LOG"; }
 
 # Copy with progress: overall line "NOTICE: [3/9]  4.1 GiB / 18.6 GiB, 22%, ..." (counted against the
-# bytes that still need downloading), one "   > file: 45% of 6.5 GiB ..." line per big file in flight,
-# and "  done [n/N] name" as each file finishes.
+# bytes that still need downloading) and "  done [n/N] name" as each file finishes. Per-file progress
+# goes to /workspace/.restore_files for the status page's small bars.
 COUNT_FILTER=/opt/vault/count_filter.py
 write_count_filter() {
     mkdir -p /opt/vault
@@ -109,6 +109,7 @@ write_count_filter() {
 import re, sys
 # args: total_files have_files need_bytes
 total, done, need = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+FILES_STATE = "/workspace/.restore_files"
 U = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}
 SZ = r"[\d.]+\s*[KMGTP]?i?B?"
 copied = re.compile(r"INFO\s*:\s*(.+?):\s*(?:Multi-thread )?Copied \((?:new|replaced existing)\)")
@@ -139,12 +140,18 @@ def flush():
         pending["files"] = []
         return
     x, sp = pending["x"], pending["speed"]
-    pct = 100 if need <= 0 else min(100, int(x * 100 / need))
+    # rclone prints rounded sizes (e.g. 51.429 GiB), so treat "within 0.05%" or all files done as 100%
+    pct = 100 if need <= 0 or x >= need * 0.9995 or done >= total else min(99, int(x * 100 / need))
     spb = to_b(sp)
     eta = secs((need - x) / spb) if spb > 0 and need > x else ("0s" if need <= x else "-")
     print(f"NOTICE: [{done}/{total}]  {h(x)} / {h(max(need, x))}, {pct}%, {h(spb)}/s, ETA {eta}", flush=True)
-    for name, p, size, fsp, feta in sorted(pending["files"], key=lambda f: -to_b(f[2]))[:4]:
-        print(f"   > {name}: {p}% of {h(to_b(size))}, {h(to_b(fsp))}/s, ETA {feta}", flush=True)
+    # per-file progress goes to a small side file for the status page's file bars (not into the log)
+    try:
+        with open(FILES_STATE, "w") as fh:
+            for name, p, size, fsp, feta in sorted(pending["files"], key=lambda f: -to_b(f[2]))[:4]:
+                fh.write(f"   > {name}: {p}% of {h(to_b(size))}, {h(to_b(fsp))}/s, ETA {feta}\n")
+    except OSError:
+        pass
     pending.update(x=None, speed="", files=[])
 
 
@@ -202,6 +209,7 @@ print(n, need)' "$2")
     write_count_filter
     "$RCLONE" copy "$1" "$2" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" -v --stats-one-line=false 2>&1 \
         | python3 -u "$COUNT_FILTER" "$total" "$have" "$need" | tee -a "$LOG"
+    rm -f "$WORKSPACE/.restore_files"
 }
 
 restart_comfyui() {
