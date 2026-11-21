@@ -72,6 +72,7 @@ bash "$DEST/vault.sh" setup
 # Restore - retried once (slow hosts sometimes drop R2 connections). A failed restore never
 # changes your R2 vault; the instance just stays in safe mode (backups copy only).
 RESTORE_FAILED=0
+export VAULT_PROVISIONING=1
 if ! vault restore; then
     echo "Restore had a problem - retrying in 20 s..."
     sleep 20
