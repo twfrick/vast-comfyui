@@ -38,8 +38,11 @@ EXCLUDES=(--exclude "**/__pycache__/**" --exclude "**/.cache/**" --exclude "**/.
           --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete"
           --exclude "**/__manager/cache/**" --exclude "*.partial")
 # --timeout/--contimeout: a silent (hung) connection is retried after 60 s instead of rclone's default 5 min
+# --s3-copy-cutoff 512M: moving a big model into R2 trash is a copy inside R2, done in parts.
+#   Default parts are ~4.6 GB; R2 can take longer than the 60 s timeout per part, so the move
+#   kept retrying and looked stuck. 512 MB parts finish well within the timeout.
 RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-upload-concurrency 8
-              --timeout 60s --contimeout 20s --multi-thread-streams 8 --multi-thread-cutoff 256M
+              --timeout 60s --contimeout 20s --s3-copy-cutoff 512M --multi-thread-streams 8 --multi-thread-cutoff 256M
               --stats 5s --stats-one-line --stats-log-level NOTICE --retries 5 --low-level-retries 20)
 
 mkdir -p "$LOG_DIR"
