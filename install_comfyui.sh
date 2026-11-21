@@ -61,6 +61,14 @@ step "3/6 ComfyUI source"
 if [ -d "$COMFY_DIR/.git" ]; then
     echo "ComfyUI already installed - updating"
     git -C "$COMFY_DIR" pull --ff-only || echo "WARNING: update failed, keeping current version"
+elif [ -d "$COMFY_DIR" ] && [ -n "$(ls -A "$COMFY_DIR" 2>/dev/null)" ]; then
+    # Folder already has files (e.g. a model downloaded from the menu before ComfyUI was installed):
+    # clone next to it and merge in without overwriting anything that is already there.
+    echo "ComfyUI folder already has files - merging a fresh copy in"
+    rm -rf "$COMFY_DIR.clone"
+    git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR.clone"
+    cp -an "$COMFY_DIR.clone/." "$COMFY_DIR/"
+    rm -rf "$COMFY_DIR.clone"
 else
     git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
 fi
