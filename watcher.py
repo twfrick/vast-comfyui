@@ -23,6 +23,7 @@ State for the status page / menu: /workspace/.watcher.json   Log: /workspace/log
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -139,7 +140,8 @@ def provisioning_done():
         return False
     text = PROVISION_LOG.read_text(errors="ignore")
     i = text.rfind("===== PROVISION started")
-    return "===== PROVISION COMPLETE" in (text[i:] if i >= 0 else text)
+    run = text[i:] if i >= 0 else text
+    return "===== PROVISION COMPLETE" in run or "PROVISION FAILED" in run
 
 
 def paused_until():
@@ -150,28 +152,58 @@ def paused_until():
 
 
 # ----------------------------------------------------------------------------- main loop
-def run_vault(*args):
-    """Run vault in the background-friendly way; returns (ok, last lines)."""
-    cmd = ["nice", "-n", "10"] + (["ionice", "-c3"] if shutil.which("ionice") else []) + ["vault", *args]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    tail = "\n".join((p.stdout + p.stderr).strip().splitlines()[-3:])
-    return p.returncode == 0, tail
+ST = {}            # current state, written to /workspace/.watcher.json
 
 
-def write_state(**kw):
-    kw["updated"] = time.time()
+def push(**kw):
+    """Update the state file (status page + menu read it)."""
+    ST.update(kw)
+    ST["updated"] = time.time()
     tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(kw))
+    tmp.write_text(json.dumps(ST))
     tmp.replace(STATE)
+
+
+RCLONE_STATS = re.compile(r"NOTICE:\s+([\d.]+\s*\w+) / ([\d.]+\s*\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
+STEP_LINE = re.compile(r"(Backing up .*|Asking Vast to .*|Vast accepted.*|BACKUP COMPLETE|Skipping backup.*|ERROR: .*|WARNING: .*)")
+
+
+def run_vault(*args):
+    """Run vault, streaming its progress into the state file every few seconds. Returns (ok, last lines)."""
+    cmd = ["nice", "-n", "10"] + (["ionice", "-c3"] if shutil.which("ionice") else []) + ["vault", *args]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines, last_push = [], 0.0
+    push(task="starting...", progress="", pct=None)
+    for line in p.stdout:
+        line = line.rstrip()
+        lines.append(line)
+        m = STEP_LINE.search(line)
+        if m:
+            step = m.group(1).replace("=", "").strip()
+            push(task=step, progress="", pct=None)
+            last_push = time.time()
+            continue
+        m = RCLONE_STATS.search(line)
+        if m and time.time() - last_push > 3:
+            done, total, pct, speed, eta = m.groups()
+            push(progress=f"{done.replace('i', '')} of {total.replace('i', '')} &middot; "
+                          f"{speed.replace('i', '')} &middot; ETA {eta}", pct=int(pct))
+            last_push = time.time()
+        elif time.time() - last_push > 20:
+            push()                          # heartbeat so the page knows we're alive
+            last_push = time.time()
+    ok = p.wait() == 0
+    return ok, "\n".join(lines[-3:])
 
 
 def main():
     log(f"watcher started: idle {IDLE_MIN} min -> {ACTION}, auto-backup every {BACKUP_MIN} min")
     last_active = time.time()
     last_backup = time.time()          # first auto-backup one interval after start
-    last_backup_ok = None
-    last_backup_note = ""
     shutdown_retry_at = 0.0
+    push(state="starting", reason="", idle=0, idle_limit=IDLE_MIN * 60, action=ACTION,
+         backup_every=BACKUP_MIN * 60, last_backup=0, last_backup_ok=None, next_backup=0,
+         paused_until=0, task="", progress="", pct=None, note="")
     while True:
         now = time.time()
         reason = ""
@@ -190,30 +222,33 @@ def main():
         if BACKUP_MIN > 0 and provisioning_done() and now - last_backup >= BACKUP_MIN * 60 \
                 and not vault_locked():
             log("auto-backup starting")
-            write_state(state="backing up", reason=reason, idle=idle, idle_limit=IDLE_MIN * 60,
-                        action=ACTION, backup_every=BACKUP_MIN * 60, last_backup=last_backup,
-                        last_backup_ok=last_backup_ok, next_backup=now)
+            push(state="backing up", reason=reason, idle=idle)
             ok, tail = run_vault("backup")
-            last_backup, last_backup_ok, last_backup_note = time.time(), ok, tail
+            last_backup = time.time()
+            push(last_backup=last_backup, last_backup_ok=ok, task="", progress="", pct=None,
+                 note="" if ok else "Last auto-backup FAILED - see /workspace/logs/vault.log")
             log(f"auto-backup {'OK' if ok else 'FAILED'}: {tail}")
 
         # ---- idle shutdown
         if ACTION != "off" and idle >= IDLE_MIN * 60 and now >= shutdown_retry_at:
             log(f"idle {int(idle // 60)} min -> backup + {ACTION}")
-            write_state(state=f"shutting down ({ACTION})", reason="", idle=idle, idle_limit=IDLE_MIN * 60,
-                        action=ACTION, backup_every=BACKUP_MIN * 60, last_backup=last_backup,
-                        last_backup_ok=last_backup_ok, next_backup=0)
+            push(state="shutting down", reason="", idle=idle)
             ok, tail = run_vault("shutdown", ACTION)
             log(f"shutdown {'requested' if ok else 'FAILED'}: {tail}")
             if ok:
-                time.sleep(600)            # Vast stops us within seconds
-            shutdown_retry_at = time.time() + 600   # if it failed (e.g. backup error), try again in 10 min
+                push(state="stopping", task=f"Vast accepted - instance will {ACTION} in a moment",
+                     progress="", pct=None, last_backup=time.time(), last_backup_ok=True)
+                for _ in range(60):        # keep the page alive until Vast stops us
+                    time.sleep(10)
+                    push()
+            else:
+                push(note="Last shutdown attempt FAILED (backup error) - instance kept running, "
+                          "retrying in 10 min. See /workspace/logs/vault.log", progress="", pct=None)
+            shutdown_retry_at = time.time() + 600
 
-        write_state(state="active" if reason else "idle", reason=reason, idle=idle, idle_limit=IDLE_MIN * 60,
-                    action=ACTION, backup_every=BACKUP_MIN * 60, last_backup=last_backup,
-                    last_backup_ok=last_backup_ok, last_backup_note=last_backup_note,
-                    next_backup=(last_backup + BACKUP_MIN * 60) if BACKUP_MIN > 0 else 0,
-                    paused_until=pause_end if pause_end > now else 0)
+        push(state="active" if reason else "idle", reason=reason, idle=idle,
+             next_backup=(last_backup + BACKUP_MIN * 60) if BACKUP_MIN > 0 else 0,
+             paused_until=pause_end if pause_end > now else 0, task="", progress="", pct=None)
         time.sleep(CHECK_EVERY)
 
 
