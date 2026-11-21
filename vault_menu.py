@@ -651,7 +651,7 @@ def show():
 
     def x_update_sum(_=None):
         sel = [(p, n) for cb, p, n in xrows if cb.value]
-        total = sum(n for _, n in xrows)
+        total = sum(n for _, _, n in xrows)
         xsum.value = (f"<b>{len(xrows)}</b> model file(s), {human(total)} shown &nbsp;|&nbsp; "
                       f"<b style='color:#c62828'>{len(sel)} selected ({human(sum(n for _, n in sel))})</b>")
 
