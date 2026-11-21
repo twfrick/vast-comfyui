@@ -130,8 +130,9 @@ def run_cmd(cmd, log, cwd=None, hide=None, on_line=None):
     if hide:
         shown = shown.replace(hide, "***")
     log(f"$ {shown}")
+    # start_new_session: the job keeps running even if the notebook kernel or JupyterLab restarts
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, shell=isinstance(cmd, str))
+                            text=True, bufsize=1, shell=isinstance(cmd, str), start_new_session=True)
     for line in proc.stdout:
         line = line.rstrip()
         if hide:
@@ -141,6 +142,30 @@ def run_cmd(cmd, log, cwd=None, hide=None, on_line=None):
         if line:
             log(line)
     return proc.wait()
+
+
+def run_detached(cmd, log, name):
+    """Run a long job (backup/restore/shutdown) fully detached: it writes to its own log file and
+    keeps running even if this notebook or JupyterLab restarts. We just follow the file."""
+    out = WORKSPACE / "logs" / f"menu-{name}.log"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("")
+    log(f"$ {' '.join(cmd)}   (log: {out})")
+    proc = subprocess.Popen(["bash", "-c", 'exec "$@" >> "$0" 2>&1', str(out)] + cmd,
+                            start_new_session=True, stdin=subprocess.DEVNULL)
+    with open(out, errors="ignore") as fh:
+        while True:
+            line = fh.readline()
+            if line:
+                if line.strip():
+                    log(line.rstrip())
+                continue
+            if proc.poll() is not None:
+                rest = fh.read()
+                if rest.strip():
+                    log(rest.rstrip())
+                return proc.returncode
+            time.sleep(0.5)
 
 
 def in_background(name, log, fn, *args):
@@ -628,7 +653,7 @@ def show():
     vr = W.Button(description="Restore from R2", icon="cloud-download")
     def vault_cmd(*args):
         vlog.clear()
-        in_background(args[0], vlog, run_cmd, ["vault", *args], vlog)
+        in_background(args[0], vlog, run_detached, ["vault", *args], vlog, args[0])
     vt = W.Button(description="Show R2 trash", icon="trash-restore")
     vtd = W.Text(placeholder="trash date, e.g. 2026-11-19_221503", layout=W.Layout(width="260px"))
     vtf = W.Dropdown(options=["all", "models", "custom_nodes", "user", "input", "jupyter"], value="all",
@@ -657,7 +682,7 @@ def show():
         cmd = ["vault", "shutdown", mode] + ([extra] if extra else [])
         vlog.clear()
         vlog(f">>> {' '.join(cmd)} - keep this tab open until it says Vast accepted")
-        in_background("shutdown", vlog, run_cmd, cmd, vlog)
+        in_background("shutdown", vlog, run_detached, cmd, vlog, "shutdown")
 
     def on_destroy(_):
         if not pconfirm.value:
