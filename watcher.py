@@ -164,7 +164,7 @@ def push(**kw):
     tmp.replace(STATE)
 
 
-RCLONE_STATS = re.compile(r"NOTICE:\s+([\d.]+\s*\w+) / ([\d.]+\s*\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
+RCLONE_STATS = re.compile(r"NOTICE:\s+(?:\[\d+/\d+\]\s*)?([\d.]+\s*\w+) / ([\d.]+\s*\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
 STEP_LINE = re.compile(r"(Backing up .*|Asking Vast to .*|Vast accepted.*|BACKUP COMPLETE|Skipping backup.*|ERROR: .*|WARNING: .*)")
 
 
