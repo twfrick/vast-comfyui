@@ -48,7 +48,7 @@ def current_run():
 
 UNITS = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3, "TiB": 1024**4,
          "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
-RCLONE_STATS = re.compile(r"NOTICE:\s+([\d.]+)\s*(\w+) / ([\d.]+)\s*(\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
+RCLONE_STATS = re.compile(r"NOTICE:\s+(?:\[(\d+)/(\d+)\]\s*)?([\d.]+)\s*(\w+) / ([\d.]+)\s*(\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
 STAGE_T = re.compile(r"^===== (.+?) =====.*\[t=(\d+)\]")
 
 
@@ -77,10 +77,11 @@ def restore_progress(run):
     for ln in reversed(lines):
         m = RCLONE_STATS.search(ln)
         if m:
-            d, du, t, tu, pct, speed, eta = m.groups()
+            fd, ft, d, du, t, tu, pct, speed, eta = m.groups()
             done = float(d) * UNITS.get(du, 1)
             total = float(t) * UNITS.get(tu, 1)
-            return (f"<div class='prog'><b>Restoring {folder}</b>: {fmt_bytes(done)} of {fmt_bytes(total)} "
+            files = f" &nbsp;&middot;&nbsp; file {fd} of {ft} done" if ft else ""
+            return (f"<div class='prog'><b>Restoring {folder}</b>{files}: {fmt_bytes(done)} of {fmt_bytes(total)} "
                     f"&nbsp;({pct}%) &nbsp;&middot;&nbsp; <b>{fmt_bytes(max(total - done, 0))} left</b> "
                     f"&nbsp;&middot;&nbsp; {speed.replace('i', '')} &nbsp;&middot;&nbsp; ETA {eta}"
                     f"<div class='bar'><div style='width:{pct}%'></div></div></div>")
@@ -187,7 +188,7 @@ def log_text(run):
 
 
 VAULT_STEP = re.compile(r"(Backing up .*|Restoring \S+|Asking Vast to .*|Vast accepted.*|WARNING: .*|ERROR: .*)")
-VAULT_STATS = re.compile(r"NOTICE:\s+([\d.]+\s*\w+) / ([\d.]+\s*\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
+VAULT_STATS = re.compile(r"NOTICE:\s+(?:\[\d+/\d+\]\s*)?([\d.]+\s*\w+) / ([\d.]+\s*\w+), (\d+)%, ([\d.]+\s*\w+/s), ETA (\S+)")
 
 
 def vault_job():
