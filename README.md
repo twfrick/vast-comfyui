@@ -96,6 +96,8 @@ Optional settings:
 | `AUTOBACKUP_MINUTES` | `15` | Automatic backup interval (`0` = off) |
 | `COMFY_URL` / `LAB_URL` | `https://comfyui.centarione.org` / `https://jupyter.centarione.org` | Links on the menu and status page |
 | `MANAGER_UI` | `new` | `legacy` = old ComfyUI-Manager window (breaks ComfyUI's "install missing nodes") |
+| `TORCH_CUDA` | `cu128` | PyTorch build. `cu128` works on every host with Max CUDA ≥ 12.8. `cu130` needs Max CUDA ≥ 13.0 (falls back to cu128 on older hosts). `auto` = cu130 on Blackwell GPUs (RTX 50xx / RTX PRO) when the driver allows it, otherwise cu128 |
+| `SAGEATTENTION` | `0` | `1` = install SageAttention (faster attention for KJNodes "Patch Sage Attention", SeedVR2, WAN video). Adds ~30 s to setup |
 | `VAULT_MAX_DELETE_FILES` / `VAULT_MAX_DELETE_GB` | `25` / `5` | Safety limit for removing files from R2 in one backup |
 | `RESTORE_OUTPUT` | `0` | `1` = also restore the output folder |
 
