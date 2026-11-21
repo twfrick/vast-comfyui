@@ -6,6 +6,7 @@ Started first thing by provision.sh and reached through the Cloudflare Tunnel
 (e.g. https://status.yourdomain.com). Updates every 5 seconds (without reloading) and shows
 setup progress, the live setup log, and links to ComfyUI / JupyterLab when ready.
 """
+import html
 import json
 import re
 import os
@@ -64,8 +65,11 @@ def fmt_secs(sec):
     return f"{sec // 60}m {sec % 60:02d}s" if sec >= 60 else f"{sec}s"
 
 
+FILE_PROG = re.compile(r"^\s*>\s+(.+?):\s*(\d+)% of ([\d.]+)\s*(\w+),\s*([^,]+),\s*ETA\s*(\S+)")
+
+
 def restore_progress(run):
-    """Latest R2 transfer numbers: which folder, done/total, % , speed, ETA, bytes left."""
+    """Restore progress: overall bar (bytes still to download) + one small bar per big file in flight."""
     lines = run.splitlines()
     if "===== Restoring vault" not in run or "===== PROVISION COMPLETE" in run:
         return ""
@@ -74,17 +78,27 @@ def restore_progress(run):
         m = re.search(r"Restoring (\S+)", ln)
         if m and "=====" not in ln:
             folder = m.group(1)
-    for ln in reversed(lines):
-        m = RCLONE_STATS.search(ln)
-        if m:
-            fd, ft, d, du, t, tu, pct, speed, eta = m.groups()
-            done = float(d) * UNITS.get(du, 1)
-            total = float(t) * UNITS.get(tu, 1)
-            files = f" &nbsp;&middot;&nbsp; file {fd} of {ft} done" if ft else ""
-            return (f"<div class='prog'><b>Restoring {folder}</b>{files}: {fmt_bytes(done)} of {fmt_bytes(total)} "
-                    f"&nbsp;({pct}%) &nbsp;&middot;&nbsp; <b>{fmt_bytes(max(total - done, 0))} left</b> "
-                    f"&nbsp;&middot;&nbsp; {speed.replace('i', '')} &nbsp;&middot;&nbsp; ETA {eta}"
-                    f"<div class='bar'><div style='width:{pct}%'></div></div></div>")
+    for i in range(len(lines) - 1, -1, -1):
+        m = RCLONE_STATS.search(lines[i])
+        if not m:
+            continue
+        fd, ft, d, du, t, tu, pct, speed, eta = m.groups()
+        done = float(d) * UNITS.get(du, 1)
+        total = float(t) * UNITS.get(tu, 1)
+        files = f" &nbsp;&middot;&nbsp; file {fd} of {ft} done" if ft else ""
+        out = (f"<div class='prog'><b>Restoring {folder}</b>{files}: {fmt_bytes(done)} of {fmt_bytes(total)} "
+               f"&nbsp;({pct}%) &nbsp;&middot;&nbsp; <b>{fmt_bytes(max(total - done, 0))} left</b> "
+               f"&nbsp;&middot;&nbsp; {speed.replace('i', '')} &nbsp;&middot;&nbsp; ETA {eta}"
+               f"<div class='bar'><div style='width:{pct}%'></div></div>")
+        for ln in lines[i + 1:i + 6]:            # per-file lines printed right after the overall line
+            f = FILE_PROG.search(ln)
+            if not f:
+                break
+            name, fp, sz, su, fsp, feta = f.groups()
+            out += (f"<div class='file'>{html.escape(name)} &nbsp;&middot;&nbsp; {fp}% of {sz} {su.replace('i', '')}"
+                    f" &nbsp;&middot;&nbsp; {fsp.replace('i', '')} &nbsp;&middot;&nbsp; ETA {feta}"
+                    f"<div class='bar small'><div style='width:{fp}%'></div></div></div>")
+        return out + "</div>"
     return f"<div class='prog'><b>Restoring {folder}</b>&hellip;</div>" if folder else ""
 
 
@@ -181,10 +195,10 @@ def log_text(run):
         busy = w.get("state") in ("backing up", "shutting down", "stopping") or (w.get("reason") or "").startswith("Backup/restore")
         if busy and VAULT_LOG.exists():
             lines = VAULT_LOG.read_text(errors="ignore").splitlines()
-            return "--- backup log (vault.log) ---\n" + "\n".join(lines[-200:])
+            return "--- backup log (vault.log) ---\n" + "\n".join(lines[-400:])
     except Exception:  # noqa: BLE001
         pass
-    return "\n".join(run.splitlines()[-200:]) or "(no log yet)"
+    return "\n".join(run.splitlines()[-400:]) or "(no log yet)"
 
 
 VAULT_STEP = re.compile(r"(Backing up .*|Restoring \S+|Asking Vast to .*|Vast accepted.*|WARNING: .*|ERROR: .*)")
@@ -286,12 +300,15 @@ html{scrollbar-width:auto;scrollbar-color:#888 #222}
 .prog{margin:10px 0;padding:10px;background:#1d2128;border-radius:8px}
 .bar{height:10px;background:#333;border-radius:5px;margin-top:6px;overflow:hidden}
 .bar div{height:100%;background:#4caf50}
+.file{margin:8px 0 0 14px;font-size:13px;color:#bbb}.bar.small{height:6px}.bar.small div{background:#64b5f6}
+a.dl{color:#90caf9;margin-left:12px;font-size:13px}
 button{background:#333;color:#ddd;border:0;border-radius:6px;padding:4px 10px;margin-left:8px;cursor:pointer}
 small{color:#888}label{color:#aaa;font-size:13px;margin-left:12px}</style></head><body>
 <div id="banner"></div><div id="steps"></div><div id="links"></div>
 <small id="updated"></small>
 <label><input type="checkbox" id="follow" checked> follow log</label>
 <label><input type="checkbox" id="pause"> pause updates</label>
+<a class="dl" href="download/setup">&#11015; full setup log</a><a class="dl" href="download/vault">&#11015; full backup/restore log</a>
 <button onclick="log.scrollTop=0">&#9650; top</button><button onclick="log.scrollTop=log.scrollHeight">&#9660; bottom</button>
 <pre id="log">loading...</pre>
 <script>
@@ -332,6 +349,16 @@ tick(); setInterval(tick, 5000);
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
+        if self.path.rstrip("/").endswith(("download/setup", "download/vault")):
+            src = LOG if self.path.rstrip("/").endswith("setup") else VAULT_LOG
+            body = src.read_bytes() if src.exists() else b"(no log yet)\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{src.name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.rstrip("/").endswith("data"):
             body, ctype = json.dumps(status()).encode(), "application/json"
         else:
