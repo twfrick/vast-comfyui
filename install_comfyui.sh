@@ -75,20 +75,73 @@ fi
 git -C "$COMFY_DIR" log -1 --format="ComfyUI version: %h (%cd)" --date=short
 
 # -----------------------------------------------------------------------------
-step "4/6 PyTorch (needs CUDA 12.8 or newer)"
-torch_ok() {
-"$PY" - <<'EOF' 2>/dev/null
+step "4/6 PyTorch (TORCH_CUDA=${TORCH_CUDA:-cu128})"
+# Template setting TORCH_CUDA:
+#   cu128 (default) - CUDA 12.8 build, works on every host with Max CUDA >= 12.8
+#   cu130           - CUDA 13.0 build, needs Max CUDA >= 13.0; falls back to cu128 if the host is too old
+#   auto            - cu130 on Blackwell GPUs (RTX 50xx / RTX PRO) when the driver allows it, otherwise cu128
+if command -v uv >/dev/null 2>&1; then
+    PIP_UNINSTALL=(uv pip uninstall --python "$PY")
+else
+    PIP_UNINSTALL=("$PY" -m pip uninstall -y)
+fi
+
+ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }   # ver_ge A B  ->  A >= B
+
+DRIVER_CUDA="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: *[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+GPU_CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
+echo "Host driver supports CUDA ${DRIVER_CUDA:-unknown} | GPU compute capability ${GPU_CC:-unknown}"
+
+WANT="${TORCH_CUDA:-cu128}"
+case "$WANT" in
+    cu128|cu130) ;;
+    auto)
+        if [ -n "$GPU_CC" ] && ver_ge "$GPU_CC" "12.0" && [ -n "$DRIVER_CUDA" ] && ver_ge "$DRIVER_CUDA" "13.0"; then
+            WANT=cu130; echo "auto: Blackwell GPU + CUDA 13 driver -> cu130"
+        else
+            WANT=cu128; echo "auto: using cu128"
+        fi ;;
+    *) echo "WARNING: unknown TORCH_CUDA='$WANT' - using cu128"; WANT=cu128 ;;
+esac
+if [ "$WANT" = "cu130" ] && { [ -z "$DRIVER_CUDA" ] || ! ver_ge "$DRIVER_CUDA" "13.0"; }; then
+    echo "WARNING: TORCH_CUDA=cu130 but this host only supports CUDA ${DRIVER_CUDA:-unknown} - using cu128 instead"
+    WANT=cu128
+fi
+WANT_MIN="12.8"; [ "$WANT" = "cu130" ] && WANT_MIN="13.0"
+
+# Prints the torch CUDA version if torch works on the GPU, otherwise "bad"
+torch_cuda() {
+"$PY" - <<'EOF' 2>/dev/null || echo bad
 import torch, torchvision, torchaudio
-maj, mi = (int(x) for x in (torch.version.cuda or "0.0").split(".")[:2])
-print("yes" if (maj, mi) >= (12, 8) and torch.cuda.is_available() else "no")
+torch.zeros(1).cuda()
+print(torch.version.cuda or "bad")
 EOF
 }
-if [ "$(torch_ok || true)" != "yes" ]; then
-    echo "Installing PyTorch CUDA 12.8 build (a few minutes)..."
-    "${PIP[@]}" torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+torch_matches() {   # current torch fits the wanted build?
+    local c; c="$(torch_cuda | tail -1)"
+    [ "$c" != "bad" ] || return 1
+    ver_ge "$c" "$WANT_MIN" || return 1
+    [ "$WANT" = "cu130" ] || ! ver_ge "$c" "13.0"   # cu128 wanted -> do not keep a 13.x build
+}
+install_torch() {   # install_torch cu128|cu130
+    echo "Installing PyTorch $1 build (a few minutes)..."
+    "${PIP_UNINSTALL[@]}" torch torchvision torchaudio >/dev/null 2>&1 || true
+    "${PIP[@]}" torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/$1"
+}
+
+if torch_matches; then
+    echo "Image PyTorch already fits $WANT - keeping it"
+else
+    install_torch "$WANT" || echo "WARNING: PyTorch $WANT install failed"
+    if ! torch_matches && [ "$WANT" = "cu130" ]; then
+        echo "WARNING: PyTorch cu130 does not work on this host - falling back to cu128"
+        WANT=cu128; WANT_MIN="12.8"
+        install_torch cu128
+    fi
 fi
-"$PY" -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda, '| GPU:', torch.cuda.get_device_name(0))" \
-    || fail "PyTorch cannot see the GPU. Rent a host with Max CUDA 12.8 or higher."
+"$PY" -c "import torch; torch.zeros(1).cuda(); print('torch', torch.__version__, '| CUDA', torch.version.cuda, '| GPU:', torch.cuda.get_device_name(0))" \
+    || fail "PyTorch cannot use the GPU. Rent a host with Max CUDA 12.8 or higher."
+echo "$WANT" > "$WORKSPACE/.torch-build"
 
 # Lock the working torch versions so nothing below can replace them
 CONSTRAINTS="$WORKSPACE/.torch-constraints.txt"
@@ -98,6 +151,17 @@ for p in ("torch", "torchvision", "torchaudio"):
     print(f"{p}=={m.version(p)}")
 EOF
 echo "Locked: $(tr '\n' ' ' < "$CONSTRAINTS")"
+
+# Optional: SageAttention (template setting SAGEATTENTION=1). Faster attention for nodes that use it
+# (KJNodes "Patch Sage Attention", SeedVR2, WAN video, ...). Off by default.
+if [ "${SAGEATTENTION:-0}" = "1" ]; then
+    echo "Installing SageAttention..."
+    if "${PIP[@]}" -c "$CONSTRAINTS" sageattention && "$PY" -c "import sageattention" 2>/dev/null; then
+        echo "SageAttention installed"
+    else
+        echo "WARNING: SageAttention install failed - ComfyUI still works, just without it"
+    fi
+fi
 
 # -----------------------------------------------------------------------------
 step "5/6 ComfyUI + Manager requirements"
