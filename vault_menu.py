@@ -669,6 +669,17 @@ def show():
         args = ["undelete", vtd.value.strip()] + ([] if vtf.value == "all" else [vtf.value])
         vault_cmd(*args)
     vu.on_click(on_undelete)
+    ve = W.Button(description="Delete from trash", button_style="danger", icon="trash")
+    vec = W.Checkbox(value=False, description="Yes, permanently delete (date above, or ALL if empty)", indent=False)
+
+    def on_empty(_):
+        if not vec.value:
+            vlog.clear()
+            vlog("Tick the confirm box first. Leave the date empty to delete ALL trash.")
+            return
+        vec.value = False
+        vault_cmd("empty-trash", vtd.value.strip() or "all", "--yes")
+    ve.on_click(on_empty)
     vb.on_click(lambda _: vault_cmd("backup"))
     vs.on_click(lambda _: vault_cmd("status"))
     vr.on_click(lambda _: vault_cmd("restore"))
@@ -726,6 +737,7 @@ def show():
                         W.HTML("<hr><b>R2 trash</b> &nbsp;<small>Files a backup removed from the vault are "
                                "kept here. Put them back, then use Restore (or start a new instance).</small>"),
                         W.HBox([vt, vtd, vtf, vu]),
+                        W.HBox([ve, vec]),
                         W.HTML("<hr><b>Shut down this instance</b> &nbsp;<small>STOP keeps the disk (small storage "
                                "charge, restart later on the same machine). DESTROY ends all charges; your files "
                                "are safe in R2. Destroy only runs if the backup succeeds.</small>"),
