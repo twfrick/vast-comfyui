@@ -408,6 +408,67 @@ def restart_comfyui(log):
     log("ComfyUI did not answer within 2 minutes - check the log")
 
 
+# ----------------------------------------------------------------------------- Model cleanup
+MODEL_SKIP = re.compile(r"(\.partial|\.aria2|\.tmp)$")
+
+
+def model_files():
+    """All model files under ComfyUI/models -> [(path, size)], sorted by folder/name."""
+    if not MODELS.exists():
+        return []
+    out = []
+    for p in MODELS.rglob("*"):
+        rel = p.relative_to(MODELS).parts
+        if any(part.startswith(".") for part in rel) or "__pycache__" in rel:
+            continue
+        if not p.is_file() or PLACEHOLDER.match(p.name) or MODEL_SKIP.search(p.name):
+            continue
+        try:
+            out.append((p, p.stat().st_size))
+        except OSError:
+            pass
+    return sorted(out, key=lambda x: str(x[0].relative_to(MODELS)).lower())
+
+
+def wait_for_vault_lock(log):
+    """Wait until no other backup/restore holds /tmp/vault.lock (e.g. the 15-min auto-backup)."""
+    import fcntl
+    told = False
+    while True:
+        with open("/tmp/vault.lock", "a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                return
+            except OSError:
+                if not told:
+                    log("Another backup is running - waiting for it to finish...")
+                    told = True
+        time.sleep(10)
+
+
+def delete_models(paths, log):
+    gone, freed = 0, 0
+    for p in paths:
+        try:
+            size = p.stat().st_size
+            p.unlink()
+            gone += 1
+            freed += size
+            log(f"Deleted {p.relative_to(MODELS)}  ({human(size)})")
+        except OSError as e:
+            log(f"ERROR: could not delete {p.relative_to(MODELS)}: {e}")
+    log(f"Deleted {gone} file(s), freed {human(freed)} on this instance.")
+    if not gone:
+        return
+    log("")
+    log("Removing them from R2 too (they go to the R2 trash first; Vault tab -> 'Show R2 trash' to put back)...")
+    wait_for_vault_lock(log)
+    rc = run_detached(["vault", "backup", "--allow-delete"], log, "model-delete")
+    log("DONE - removed from R2 (in R2 trash)." if rc == 0
+        else "WARNING: backup did not finish - the models are still in R2. Run Backup on the Vault tab.")
+
+
 # ----------------------------------------------------------------------------- Outputs
 PLACEHOLDER = re.compile(r"^(_.*_will_be_put_here|put_.*_here)$")   # ComfyUI's empty marker files
 
@@ -576,6 +637,81 @@ def show():
                          W.HTML("<small>You can start several downloads; they run in the background.</small>"),
                          mprog, mlog.widget])
 
+    # ---------- Models tab (list + delete)
+    xlog = LogBox()
+    xfolder = W.Dropdown(options=["All folders"], value="All folders", description="Folder:", style=style)
+    xrefresh = W.Button(description="Refresh list", icon="refresh")
+    xall = W.Button(description="Select all", icon="check-square")
+    xnone = W.Button(description="Clear selection", icon="square")
+    xconfirm = W.Checkbox(value=False, description="Yes, delete the selected models", indent=False)
+    xdel = W.Button(description="Delete selected", button_style="danger", icon="trash")
+    xsum = W.HTML()
+    xbox = W.VBox(layout=W.Layout(max_height="420px", overflow_y="auto", border="1px solid #ddd", padding="4px"))
+    xrows = []   # (checkbox, path, size)
+
+    def x_update_sum(_=None):
+        sel = [(p, n) for cb, p, n in xrows if cb.value]
+        total = sum(n for _, n in xrows)
+        xsum.value = (f"<b>{len(xrows)}</b> model file(s), {human(total)} shown &nbsp;|&nbsp; "
+                      f"<b style='color:#c62828'>{len(sel)} selected ({human(sum(n for _, n in sel))})</b>")
+
+    def x_build(_=None):
+        files = model_files()
+        folders = sorted({p.relative_to(MODELS).parts[0] for p, _ in files if len(p.relative_to(MODELS).parts) > 1})
+        keep = xfolder.value if xfolder.value in folders else "All folders"
+        xfolder.unobserve(x_build, "value")
+        xfolder.options = ["All folders"] + folders
+        xfolder.value = keep
+        xfolder.observe(x_build, "value")
+        xrows.clear()
+        kids, last = [], None
+        for p, n in files:
+            rel = p.relative_to(MODELS)
+            top = rel.parts[0] if len(rel.parts) > 1 else "(models)"
+            if keep != "All folders" and top != keep:
+                continue
+            if top != last:
+                kids.append(W.HTML(f"<b style='font-size:1.05em'>{html.escape(top)}/</b>"))
+                last = top
+            cb = W.Checkbox(value=False, indent=False, layout=W.Layout(width="auto"),
+                            description=f"{rel}   ({human(n)})")
+            cb.observe(x_update_sum, "value")
+            xrows.append((cb, p, n))
+            kids.append(cb)
+        xbox.children = kids or [W.HTML("No models found.")]
+        xconfirm.value = False
+        x_update_sum()
+    xfolder.observe(x_build, "value")
+    xrefresh.on_click(x_build)
+
+    def x_set_all(v):
+        for cb, _, _ in xrows:
+            cb.value = v
+    xall.on_click(lambda _: x_set_all(True))
+    xnone.on_click(lambda _: x_set_all(False))
+
+    def on_xdel(_):
+        xlog.clear()
+        sel = [p for cb, p, _ in xrows if cb.value]
+        if not sel:
+            xlog("Tick at least one model first.")
+            return
+        if not xconfirm.value:
+            xlog(f"{len(sel)} model(s) selected. Tick 'Yes, delete the selected models', then click Delete again.")
+            return
+        xconfirm.value = False
+        def job():
+            delete_models(sel, xlog)
+            x_build()
+        in_background("model-delete", xlog, job)
+    xdel.on_click(on_xdel)
+    x_build()
+    cleanup_tab = W.VBox([
+        W.HTML("Tick the models you no longer want, then delete. They are removed here and from R2 "
+               "(R2 keeps them in its trash until you empty it on the Vault tab)."),
+        W.HBox([xfolder, xrefresh, xall, xnone]), xsum, xbox,
+        W.HBox([xconfirm, xdel]), xlog.widget])
+
     # ---------- Nodes tab
     nlog = LogBox()
     nurl = W.Text(placeholder="https://github.com/user/ComfyUI-SomeNode", description="GitHub link:",
@@ -583,28 +719,79 @@ def show():
     nrestart = W.Checkbox(value=True, description="Restart ComfyUI when done")
     nbtn = W.Button(description="Install node", button_style="primary", icon="plus")
     nupd = W.Button(description="Update all nodes", icon="sync")
+    nrefresh = W.Button(description="Refresh list", icon="refresh")
     nlist = W.HTML()
 
+    def node_status():
+        """Read the last ComfyUI start in comfyui.log -> ({folder: 'ok'|'failed'}, start time)."""
+        p = WORKSPACE / "logs" / "comfyui.log"
+        try:
+            text = re.sub(r"\x1b\[[0-9;]*m", "", p.read_text(errors="ignore"))
+        except OSError:
+            return {}, None
+        i = text.rfind("Import times for custom nodes:")
+        if i < 0:
+            return {}, None
+        status = {}
+        for line in text[i:].splitlines()[1:]:
+            m = re.search(r"seconds( \(IMPORT FAILED\))?: (.+)$", line)
+            if not m:
+                if status:
+                    break
+                continue
+            status[Path(m.group(2).strip()).name] = "failed" if m.group(1) else "ok"
+        return status, None
+
     def list_nodes():
-        names = sorted(p.name for p in NODES.iterdir() if p.is_dir() and not p.name.startswith((".", "__"))) \
+        names = sorted(p.name for p in NODES.iterdir()
+                       if (p.is_dir() or p.suffix == ".py") and not p.name.startswith((".", "__"))) \
             if NODES.exists() else []
-        nlist.value = "<b>Installed:</b> " + (", ".join(names) if names else "none")
+        status, _ = node_status()
+        rows, failed, pending = [], 0, 0
+        for n in names:
+            st = status.get(n)
+            if st == "ok":
+                rows.append(f"<span style='color:#2e7d32'>&#10004; {html.escape(n)}</span>")
+            elif st == "failed":
+                failed += 1
+                rows.append(f"<span style='color:#c62828'><b>&#10008; {html.escape(n)} (failed to load)</b></span>")
+            else:
+                pending += 1
+                rows.append(f"<span style='color:#ef6c00'><b>&#9888; {html.escape(n)} (restart ComfyUI to load)</b></span>")
+        notes = []
+        if pending:
+            notes.append(f"<span style='color:#ef6c00'>{pending} not loaded yet: click <b>Restart ComfyUI</b> "
+                         "(ComfyUI tab), then Ctrl+Shift+R in the ComfyUI page.</span>")
+        if failed:
+            notes.append(f"<span style='color:#c62828'>{failed} failed: ComfyUI tab &rarr; Show ComfyUI log, "
+                         "look for IMPORT FAILED.</span>")
+        nlist.value = (f"<b>Installed ({len(names)}):</b><br>" + ("<br>".join(rows) if rows else "none")
+                       + ("<br>" + "<br>".join(notes) if notes else "")
+                       + f"<br><small>Checked {time.strftime('%H:%M:%S')}</small>")
     list_nodes()
+    nrefresh.on_click(lambda _: list_nodes())
 
     def on_node(_):
         link = nurl.value
+        nlog.clear()
         if not link.strip():
             nlog("Paste a link first.")
             return
         nurl.value = ""
-        nlog.clear()
         def job():
             github_install(link, nrestart.value, nlog)
             list_nodes()
         in_background("node", nlog, job)
     nbtn.on_click(on_node)
-    nupd.on_click(lambda _: in_background("update", nlog, update_all_nodes, nlog))
-    nodes_tab = W.VBox([nurl, W.HBox([nbtn, nrestart, nupd]), nlist, nlog.widget])
+
+    def on_update(_):
+        nlog.clear()
+        def job():
+            update_all_nodes(nlog)
+            list_nodes()
+        in_background("update", nlog, job)
+    nupd.on_click(on_update)
+    nodes_tab = W.VBox([nurl, W.HBox([nbtn, nrestart, nupd, nrefresh]), nlist, nlog.widget])
 
     # ---------- Outputs tab
     olog = LogBox("160px")
@@ -759,7 +946,10 @@ def show():
     ctail = W.Button(description="Show ComfyUI log", icon="file-text")
     def on_restart(_):
         clog.clear()
-        in_background("restart", clog, restart_comfyui, clog)
+        def job():
+            restart_comfyui(clog)
+            list_nodes()   # Nodes tab shows what loaded after this restart
+        in_background("restart", clog, job)
     crestart.on_click(on_restart)
 
     def on_tail(_):
@@ -772,8 +962,8 @@ def show():
     ctail.on_click(on_tail)
     comfy_tab = W.VBox([W.HBox([crestart, ctail]), clog.widget])
 
-    tabs = W.Tab(children=[models_tab, nodes_tab, outputs_tab, vault_tab, comfy_tab])
-    for i, t in enumerate(["Models", "Nodes", "Outputs", "Vault", "ComfyUI"]):
+    tabs = W.Tab(children=[models_tab, cleanup_tab, nodes_tab, outputs_tab, vault_tab, comfy_tab])
+    for i, t in enumerate(["Download", "Models", "Nodes", "Outputs", "Vault", "ComfyUI"]):
         tabs.set_title(i, t)
     boot_out = W.Output()
     display(W.VBox([W.HBox([header, refresh]), tabs, boot_out]))
