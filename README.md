@@ -142,8 +142,9 @@ If you fork this repo, change `REPO` at the top of `provision.sh` (or set `VAULT
 4. **End** with Menu → Vault → **Backup & DESTROY**, or let the idle watcher stop the instance.
 
 ### Menu tabs
-- **Models:** Hugging Face / Civitai link → models folder, with progress bars. *List folder* shows a folder's files.
-- **Nodes:** install a custom node from a GitHub link; *Update all nodes*.
+- **Download:** Hugging Face / Civitai link → models folder, with progress bars. *List folder* shows a folder's files.
+- **Models:** every model file with a checkbox (filter by folder, *Select all*). *Delete selected* (after the confirm tick) removes them here and runs `vault backup --allow-delete`, so they leave R2 too; R2 keeps them in its trash until you empty it on the Vault tab.
+- **Nodes:** install a custom node from a GitHub link; *Update all nodes*; *Refresh list* shows each node as loaded (green), failed (red) or waiting for a ComfyUI restart (orange).
 - **Outputs:** send every output file (subfolders included, no zip) to the browser; *NEW only* skips files already downloaded.
 - **Vault:** Backup now / Status / Restore; R2 trash (show, put back, delete); Backup & STOP / Backup & DESTROY / Stop now; Keep awake.
 - **ComfyUI:** restart, show log.
