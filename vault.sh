@@ -35,7 +35,9 @@ RESTORE_OUTPUT="${RESTORE_OUTPUT:-0}"          # set to 1 to also restore output
 
 EXCLUDES=(--exclude "**/__pycache__/**" --exclude "**/.cache/**" --exclude "**/.ipynb_checkpoints/**"
           --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete")
+# --timeout/--contimeout: a silent (hung) connection is retried after 60 s instead of rclone's default 5 min
 RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-upload-concurrency 8
+              --timeout 60s --contimeout 20s
               --stats 5s --stats-one-line --stats-log-level NOTICE --retries 5 --low-level-retries 20)
 
 mkdir -p "$LOG_DIR"
@@ -244,11 +246,19 @@ restore_dir() {   # remote-subdir local-dir  (fails loudly; verifies size)
     log "  $1 verified ($(awk -v b="$r" 'BEGIN{printf "%.2f GB", b/1073741824}'))"
 }
 
-cmd_restore() {
-    ensure_rclone; load_env; need_comfy; take_lock
-    local d
+cmd_restore() {   # [jupyter | --skip-jupyter]
+    local mode="${1:-all}"
+    ensure_rclone; load_env; take_lock
+    [ "$mode" = "jupyter" ] || need_comfy
+    local d top
+    if [ "$mode" = "jupyter" ]; then
+        log "===== RESTORE (Jupyter settings) ====="
+        restore_jupyter
+        log "===== RESTORE (Jupyter settings) COMPLETE ====="
+        return 0
+    fi
     log "===== RESTORE started ====="
-    local top; top=$(remote_state "$REMOTE") || exit 1
+    top=$(remote_state "$REMOTE") || exit 1
     if [ "$top" = empty ]; then
         log "R2 has no backup yet (first run) - nothing to restore"
         touch "$MARKER"
@@ -256,16 +266,8 @@ cmd_restore() {
         return 0
     fi
     "$RCLONE" cat "$REMOTE/.last_backup" 2>/dev/null | sed 's/^/Last backup: /' | tee -a "$LOG" || true
-    # Small things first: Jupyter settings (then JupyterLab is fully usable), workflows,
-    # inputs and nodes; the big models come last.
-    log "Restoring Jupyter settings"
-    restore_dir jupyter "$WORKSPACE/.jupyter"
-    # Restart JupyterLab to load the settings - only during instance setup. A restore started
-    # from the menu/terminal runs *inside* JupyterLab, and restarting it would kill the restore.
-    if [ "${VAULT_PROVISIONING:-0}" = "1" ] && supervisorctl status labvault >/dev/null 2>&1; then
-        supervisorctl restart labvault >/dev/null || true
-        log "JupyterLab ready with your settings (models still restoring)"
-    fi
+    [ "$mode" = "--skip-jupyter" ] || restore_jupyter
+    # Small things first (workflows, inputs, nodes); the big models come last.
     for d in user input custom_nodes models; do
         log "Restoring $d"
         restore_dir "$d" "$COMFY/$d"
@@ -278,6 +280,17 @@ cmd_restore() {
     touch "$MARKER"
     restart_comfyui
     log "===== RESTORE COMPLETE ====="
+}
+
+restore_jupyter() {
+    log "Restoring Jupyter settings"
+    restore_dir jupyter "$WORKSPACE/.jupyter"
+    # Restart JupyterLab to load them - only during instance setup. A restore started from the
+    # menu/terminal runs *inside* JupyterLab, and restarting it would kill the restore.
+    if [ "${VAULT_PROVISIONING:-0}" = "1" ] && supervisorctl status labvault >/dev/null 2>&1; then
+        supervisorctl restart labvault >/dev/null || true
+        log "JupyterLab ready with your settings"
+    fi
 }
 
 cmd_status() {
@@ -377,7 +390,7 @@ case "$CMD" in
     trash)   cmd_trash ;;
     rclone)  shift; ensure_rclone; load_env; exec "$RCLONE" "$@" ;;
     undelete) cmd_undelete "${2:-}" "${3:-}" ;;
-    restore) cmd_restore ;;
+    restore) cmd_restore "${2:-all}" ;;
     status)  cmd_status ;;
     shutdown) cmd_shutdown "${2:-}" "${3:-}" ;;
     *) echo "Usage: vault setup | backup [--allow-delete] | restore | status | trash | undelete <date> [folder] | shutdown stop|destroy [--no-backup] | rclone <args>  (paths: r2:$R2_BUCKET/...)"; exit 1 ;;
