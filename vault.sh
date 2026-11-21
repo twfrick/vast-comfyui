@@ -260,7 +260,9 @@ cmd_restore() {
     # inputs and nodes; the big models come last.
     log "Restoring Jupyter settings"
     restore_dir jupyter "$WORKSPACE/.jupyter"
-    if supervisorctl status labvault >/dev/null 2>&1; then
+    # Restart JupyterLab to load the settings - only during instance setup. A restore started
+    # from the menu/terminal runs *inside* JupyterLab, and restarting it would kill the restore.
+    if [ "${VAULT_PROVISIONING:-0}" = "1" ] && supervisorctl status labvault >/dev/null 2>&1; then
         supervisorctl restart labvault >/dev/null || true
         log "JupyterLab ready with your settings (models still restoring)"
     fi
@@ -373,9 +375,10 @@ case "$CMD" in
     setup)   cmd_setup ;;
     backup)  cmd_backup "${2:-}" ;;
     trash)   cmd_trash ;;
+    rclone)  shift; ensure_rclone; load_env; exec "$RCLONE" "$@" ;;
     undelete) cmd_undelete "${2:-}" "${3:-}" ;;
     restore) cmd_restore ;;
     status)  cmd_status ;;
     shutdown) cmd_shutdown "${2:-}" "${3:-}" ;;
-    *) echo "Usage: vault setup | backup [--allow-delete] | restore | status | trash | undelete <date> [folder] | shutdown stop|destroy [--no-backup]"; exit 1 ;;
+    *) echo "Usage: vault setup | backup [--allow-delete] | restore | status | trash | undelete <date> [folder] | shutdown stop|destroy [--no-backup] | rclone <args>  (paths: r2:$R2_BUCKET/...)"; exit 1 ;;
 esac
