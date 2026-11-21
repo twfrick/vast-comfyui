@@ -22,9 +22,9 @@ LAB_URL = os.environ.get("LAB_URL", "https://jupyter.centarione.org")
 STAGES = [  # (marker in provision.log, label)
     ("===== PROVISION started", "Instance started, scripts downloaded"),
     ("===== Cloudflare Tunnel", "Tunnel + this status page"),
+    ("===== Jupyter settings + menu", "JupyterLab + menu ready (you can use it now)"),
     ("===== Installing ComfyUI", "Installing ComfyUI + PyTorch"),
-    ("===== Restoring vault", "Restoring models, nodes, workflows from R2"),
-    ("===== Jupyter menu", "Menu notebook"),
+    ("===== Restoring vault", "Restoring workflows, nodes, then models from R2"),
     ("===== PROVISION COMPLETE", "Ready"),
 ]
 
@@ -67,7 +67,7 @@ def fmt_secs(sec):
 def restore_progress(run):
     """Latest R2 transfer numbers: which folder, done/total, % , speed, ETA, bytes left."""
     lines = run.splitlines()
-    if "===== Restoring vault" not in run or "===== Jupyter menu" in run:
+    if "===== Restoring vault" not in run or "===== PROVISION COMPLETE" in run:
         return ""
     folder = ""
     for ln in lines:
