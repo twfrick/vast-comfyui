@@ -42,6 +42,12 @@ RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-
 
 mkdir -p "$LOG_DIR"
 log()  { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+section() {   # a step header framed by lines, easy to spot in the log
+    local bar="============================================================"
+    printf '\n%s\n' "$bar" | tee -a "$LOG"
+    log "$*"
+    printf '%s\n' "$bar" | tee -a "$LOG"
+}
 die()  { log "ERROR: $*"; exit 1; }
 trap 'log "ERROR: vault ${CMD:-} failed (line $LINENO). See $LOG"' ERR
 
@@ -125,7 +131,7 @@ for line in sys.stdin:
     if path and os.path.isfile(p) and str(os.path.getsize(p)) == size:
         n += 1
 print(n)' "$2")
-    log "Restoring ${3:-files} ($total file(s), $have already here)"
+    section "Restoring ${3:-files} ($total file(s), $have already here)"
     "$RCLONE" copy "$1" "$2" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" -v 2>&1 \
         | python3 -u -c "$COUNT_PY" "$total" "$have" "$2" | tee -a "$LOG"
 }
@@ -226,11 +232,11 @@ cmd_backup() {   # [--allow-delete]
     fi
     for d in $MIRROR_DIRS; do
         [ -d "$COMFY/$d" ] || continue
-        log "Backing up $d"
+        section "Backing up $d"
         mirror_or_copy "$COMFY/$d" "$REMOTE/$d" "$TRASH/$stamp/$d" "$allow"
     done
     if [ -d "$WORKSPACE/.jupyter" ]; then
-        log "Backing up Jupyter settings"
+        section "Backing up Jupyter settings"
         mirror_or_copy "$WORKSPACE/.jupyter" "$REMOTE/jupyter" "$TRASH/$stamp/jupyter" "$allow"
     fi
     if [ -d "$WORKSPACE/logs" ]; then
@@ -240,7 +246,7 @@ cmd_backup() {   # [--allow-delete]
     fi
     for d in $KEEP_DIRS; do
         [ -d "$COMFY/$d" ] || continue
-        log "Backing up $d (never deleted in R2)"
+        section "Backing up $d (never deleted in R2)"
         rc copy "$COMFY/$d" "$REMOTE/$d"
     done
     local gpu; gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
@@ -272,7 +278,7 @@ restore_dir() {   # remote-subdir local-dir  (fails loudly; verifies size)
     local st r l
     mkdir -p "$2"
     st=$(remote_state "$REMOTE/$1") || exit 1
-    if [ "$st" = empty ]; then log "Restoring $1 (nothing in R2)"; return 0; fi
+    if [ "$st" = empty ]; then section "Restoring $1 (nothing in R2)"; return 0; fi
     rc_counted "$REMOTE/$1" "$2" "$1"
     r=$(bytes_of "$REMOTE/$1") || exit 1
     l=$(bytes_of "$2") || exit 1
