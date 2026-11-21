@@ -69,7 +69,15 @@ bash "$DEST/install_comfyui.sh"
 
 stage "Restoring vault from R2"
 bash "$DEST/vault.sh" setup
-vault restore
+# Restore - retried once (slow hosts sometimes drop R2 connections). A failed restore never
+# changes your R2 vault; the instance just stays in safe mode (backups copy only).
+RESTORE_FAILED=0
+if ! vault restore; then
+    echo "Restore had a problem - retrying in 20 s..."
+    sleep 20
+    vault restore || RESTORE_FAILED=1
+fi
+[ "$RESTORE_FAILED" = 1 ] && echo "RESTORE FAILED - your R2 vault was NOT changed. Destroy this instance and try another host (or run: vault restore)"
 
 
 stage "Jupyter menu"
