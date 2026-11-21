@@ -211,7 +211,10 @@ def status():
         rows.append(f"<div class='st'>{icon} {label}{took}</div>")
 
     w_banner, w_html = watcher_block() if done else (None, "")
-    if failed:
+    if "RESTORE FAILED" in run:
+        banner, cls = ("RESTORE FAILED &mdash; your R2 vault was NOT changed. Destroy this instance and "
+                       "rent another host (or run <code>vault restore</code> in the terminal)."), "bad"
+    elif failed:
         banner, cls = "Setup FAILED - see the log below", "bad"
     elif done and comfy_ok:
         banner, cls = f"READY &nbsp;<small>setup took {fmt_secs(total)}</small>", "ok"
@@ -228,7 +231,8 @@ def status():
         updated = f"Log last updated {mins} min ago" if mins else "Log updated just now"
     return {
         "title": "READY" if (done and comfy_ok) else ("FAILED" if failed else "Setting up"),
-        "banner": w_banner or f"<div class='b {cls}'>{banner}</div>",
+        "banner": (f"<div class='b {cls}'>{banner}</div>" if "RESTORE FAILED" in run
+                   else w_banner or f"<div class='b {cls}'>{banner}</div>"),
         "steps": speed_line(run) + "".join(rows) + restore_progress(run) + w_html,
         "links": links, "updated": updated,
         "log": log_text(run),
