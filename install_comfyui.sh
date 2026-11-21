@@ -136,6 +136,71 @@ for url in $DEFAULT_NODES; do
     fi
 done
 
+# Activity reporter for the idle watcher: clicking/typing/moving windows in ComfyUI counts as "in use"
+VA="$COMFY_DIR/custom_nodes/ComfyUI-VaultActivity"
+mkdir -p "$VA/web"
+cat > "$VA/__init__.py" <<'VAEOF'
+"""
+ComfyUI-VaultActivity - tells the idle watcher that someone is using ComfyUI.
+
+The browser part (web/vault_activity.js) pings /vault/activity at most every 30 s while
+you click, type, scroll or move the mouse in ComfyUI. Each ping updates the time stamp of
+/workspace/.comfy_activity, which the idle watcher treats as "in use".
+An open but untouched ComfyUI tab sends nothing, so idle shutdown still works.
+"""
+import os
+import time
+
+from aiohttp import web
+from server import PromptServer
+
+MARK = os.path.join(os.environ.get("WORKSPACE", "/workspace"), ".comfy_activity")
+
+
+@PromptServer.instance.routes.post("/vault/activity")
+async def vault_activity(request):
+    try:
+        with open(MARK, "a"):
+            pass
+        os.utime(MARK, None)
+    except OSError:
+        pass
+    return web.json_response({"ok": True, "t": time.time()})
+
+
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
+WEB_DIRECTORY = "./web"
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+VAEOF
+cat > "$VA/web/vault_activity.js" <<'VAEOF'
+// Tells the idle watcher you are using ComfyUI (editing, saving, switching tabs, moving windows).
+import { app } from "../../scripts/app.js";
+
+const EVERY_MS = 30000;
+let last = 0;
+
+function ping() {
+  const now = Date.now();
+  if (now - last < EVERY_MS) return;
+  last = now;
+  // relative URL: works at the site root (tunnel) and behind Vast's portal
+  fetch(new URL("vault/activity", window.location.origin + window.location.pathname.replace(/[^/]*$/, "")),
+        { method: "POST", keepalive: true }).catch(() => {});
+}
+
+app.registerExtension({
+  name: "vault.activity",
+  setup() {
+    for (const ev of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) {
+      window.addEventListener(ev, ping, { passive: true, capture: true });
+    }
+    ping();
+  },
+});
+VAEOF
+echo "Added ComfyUI-VaultActivity (tells the idle watcher when you use ComfyUI)"
+
 # -----------------------------------------------------------------------------
 step "6/6 ComfyUI service"
 mkdir -p /opt/supervisor-scripts
