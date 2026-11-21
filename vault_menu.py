@@ -540,6 +540,9 @@ def show():
             mlog("Paste a link first.")
             return
         murl.value = ""
+        mlog.clear()
+        mprog.children = tuple(w for w in mprog.children
+                               if w.children[1].bar_style not in ("success", "danger"))
         row = ProgressRow("looking up " + ("Hugging Face" if which == "Hugging Face" else "Civitai") + "...")
         mprog.children = tuple(mprog.children) + (row.widget,)
         fn = hf_download if which == "Hugging Face" else civitai_download
@@ -594,6 +597,7 @@ def show():
             nlog("Paste a link first.")
             return
         nurl.value = ""
+        nlog.clear()
         def job():
             github_install(link, nrestart.value, nlog)
             list_nodes()
@@ -621,6 +625,7 @@ def show():
     out_info()
 
     def start_download(files):
+        olog.clear()
         if not files:
             olog("Nothing to download.")
             return
