@@ -99,41 +99,109 @@ need_comfy() { [ -d "$COMFY" ] || die "ComfyUI not found at $COMFY - run install
 
 rc() { "$RCLONE" "$@" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" 2>&1 | tee -a "$LOG"; }
 
-# Copy with a file counter: "NOTICE: [3/9]  12.3 GiB / 51.4 GiB ..." and "  done [3/9] name"
-COUNT_PY='
-import os, re, sys
-total, done, local = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-stats = re.compile(r"(NOTICE:\s+)(?=[\d.]+\s*\w+ / )")
-copied = re.compile(r"INFO\s*:\s*(.+?):\s*(Multi-thread )?Copied \((new|replaced existing)\)")
-for line in sys.stdin:
-    line = line.rstrip("\n")
+# Copy with progress: overall line "NOTICE: [3/9]  4.1 GiB / 18.6 GiB, 22%, ..." (counted against the
+# bytes that still need downloading), one "   > file: 45% of 6.5 GiB ..." line per big file in flight,
+# and "  done [n/N] name" as each file finishes.
+COUNT_FILTER=/opt/vault/count_filter.py
+write_count_filter() {
+    mkdir -p /opt/vault
+    cat > "$COUNT_FILTER" <<'PYEOF'
+import re, sys
+# args: total_files have_files need_bytes
+total, done, need = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+U = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}
+SZ = r"[\d.]+\s*[KMGTP]?i?B?"
+copied = re.compile(r"INFO\s*:\s*(.+?):\s*(?:Multi-thread )?Copied \((?:new|replaced existing)\)")
+bytes_line = re.compile(rf"(?:Transferred:|NOTICE:)\s+({SZ}) / ({SZ}), [^,]*, ({SZ}/s)")
+file_line = re.compile(rf"^\s*\*\s+(.+?):\s*(\d+)%\s*/\s*({SZ}),\s*({SZ}/s),\s*(\S+)")
+pending = {"x": None, "speed": "", "files": []}
+
+
+def to_b(v):
+    m = re.match(r"([\d.]+)\s*([KMGTP]?)", v.strip())
+    return float(m.group(1)) * U[m.group(2)] if m else 0.0
+
+
+def h(b):
+    for u in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if b < 1024 or u == "TiB":
+            return f"{b:.3f} {u}" if u != "B" else f"{int(b)} B"
+        b /= 1024
+
+
+def secs(s):
+    s = int(s)
+    return f"{s // 3600}h{s % 3600 // 60}m" if s >= 3600 else (f"{s // 60}m{s % 60}s" if s >= 60 else f"{s}s")
+
+
+def flush():
+    if pending["x"] is None:
+        pending["files"] = []
+        return
+    x, sp = pending["x"], pending["speed"]
+    pct = 100 if need <= 0 else min(100, int(x * 100 / need))
+    spb = to_b(sp)
+    eta = secs((need - x) / spb) if spb > 0 and need > x else ("0s" if need <= x else "-")
+    print(f"NOTICE: [{done}/{total}]  {h(x)} / {h(max(need, x))}, {pct}%, {h(spb)}/s, ETA {eta}", flush=True)
+    for name, p, size, fsp, feta in sorted(pending["files"], key=lambda f: -to_b(f[2]))[:4]:
+        print(f"   > {name}: {p}% of {h(to_b(size))}, {h(to_b(fsp))}/s, ETA {feta}", flush=True)
+    pending.update(x=None, speed="", files=[])
+
+
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
     m = copied.search(line)
     if m:
         done += 1
         print(f"  done [{done}/{total}] {m.group(1)}", flush=True)
         continue
-    if " INFO " in line or "INFO  :" in line:
-        continue                      # other chatty -v lines
-    print(stats.sub(lambda x: f"NOTICE: [{done}/{total}]  ", line), flush=True)
-'
+    m = file_line.search(line)
+    if m:
+        pending["files"].append(m.groups())
+        continue
+    m = bytes_line.search(line)
+    if m:
+        flush()                                   # previous block (if any)
+        pending["x"], pending["speed"] = to_b(m.group(1)), m.group(3)
+        if "NOTICE:" in line and "Transferred:" not in line:
+            flush()                               # one-line stats: nothing more follows
+        continue
+    s = line.strip()
+    if not s:
+        flush()
+        continue
+    if " INFO " in line or "INFO  :" in line or s.startswith(("Transferred:", "Elapsed time:", "Checks:",
+                                                              "Transferring:", "Errors:", "Renamed:", "Deleted:")) \
+            or re.search(r"NOTICE:\s*$", line):
+        continue
+    flush()
+    print(line, flush=True)
+flush()
+PYEOF
+}
 
-rc_counted() {   # src dst label  (download into a local folder, with file counter)
-    local list total have
+rc_counted() {   # src dst label  (download into a local folder, with progress)
+    local list total have need
     list=$("$RCLONE" lsf -R --files-only --format sp "$1" "${EXCLUDES[@]}" 2>/dev/null) || list=""
     total=$(printf '%s' "$list" | grep -c . || true)
-    # files already here with the right size (a resumed restore skips them)
-    have=$(printf '%s\n' "$list" | python3 -c '
+    # files already here with the right size are skipped (resumed restore); count what is left
+    read -r have need < <(printf '%s\n' "$list" | python3 -c '
 import os, sys
-dst = sys.argv[1]; n = 0
+dst = sys.argv[1]; n = 0; need = 0
 for line in sys.stdin:
     size, _, path = line.rstrip("\n").partition(";")
+    if not path:
+        continue
     p = os.path.join(dst, path)
-    if path and os.path.isfile(p) and str(os.path.getsize(p)) == size:
+    if os.path.isfile(p) and str(os.path.getsize(p)) == size:
         n += 1
-print(n)' "$2")
-    section "Restoring ${3:-files} ($total file(s), $have already here)"
-    "$RCLONE" copy "$1" "$2" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" -v 2>&1 \
-        | python3 -u -c "$COUNT_PY" "$total" "$have" "$2" | tee -a "$LOG"
+    else:
+        need += int(size or 0)
+print(n, need)' "$2")
+    section "Restoring ${3:-files} ($total file(s), $have already here, $(awk -v b="$need" 'BEGIN{printf "%.2f GB", b/1073741824}') to download)"
+    write_count_filter
+    "$RCLONE" copy "$1" "$2" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" -v --stats-one-line=false 2>&1 \
+        | python3 -u "$COUNT_FILTER" "$total" "$have" "$need" | tee -a "$LOG"
 }
 
 restart_comfyui() {
