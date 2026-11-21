@@ -90,10 +90,14 @@ def restore_progress(run):
                f"&nbsp;({pct}%) &nbsp;&middot;&nbsp; <b>{fmt_bytes(max(total - done, 0))} left</b> "
                f"&nbsp;&middot;&nbsp; {speed.replace('i', '')} &nbsp;&middot;&nbsp; ETA {eta}"
                f"<div class='bar'><div style='width:{pct}%'></div></div>")
-        for ln in lines[i + 1:i + 6]:            # per-file lines printed right after the overall line
+        try:                                     # per-file progress written by the restore
+            side = Path("/workspace/.restore_files").read_text(errors="ignore").splitlines()
+        except OSError:
+            side = []
+        for ln in side[:4]:
             f = FILE_PROG.search(ln)
             if not f:
-                break
+                continue
             name, fp, sz, su, fsp, feta = f.groups()
             out += (f"<div class='file'>{html.escape(name)} &nbsp;&middot;&nbsp; {fp}% of {sz} {su.replace('i', '')}"
                     f" &nbsp;&middot;&nbsp; {fsp.replace('i', '')} &nbsp;&middot;&nbsp; ETA {feta}"
