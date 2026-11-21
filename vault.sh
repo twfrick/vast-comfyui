@@ -37,7 +37,7 @@ EXCLUDES=(--exclude "**/__pycache__/**" --exclude "**/.cache/**" --exclude "**/.
           --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete")
 # --timeout/--contimeout: a silent (hung) connection is retried after 60 s instead of rclone's default 5 min
 RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-upload-concurrency 8
-              --timeout 60s --contimeout 20s
+              --timeout 60s --contimeout 20s --multi-thread-streams 8 --multi-thread-cutoff 256M
               --stats 5s --stats-one-line --stats-log-level NOTICE --retries 5 --low-level-retries 20)
 
 mkdir -p "$LOG_DIR"
@@ -92,6 +92,43 @@ take_lock() {
 need_comfy() { [ -d "$COMFY" ] || die "ComfyUI not found at $COMFY - run install_comfyui.sh first"; }
 
 rc() { "$RCLONE" "$@" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" 2>&1 | tee -a "$LOG"; }
+
+# Copy with a file counter: "NOTICE: [3/9]  12.3 GiB / 51.4 GiB ..." and "  done [3/9] name"
+COUNT_PY='
+import os, re, sys
+total, done, local = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+stats = re.compile(r"(NOTICE:\s+)(?=[\d.]+\s*\w+ / )")
+copied = re.compile(r"INFO\s*:\s*(.+?):\s*(Multi-thread )?Copied \((new|replaced existing)\)")
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    m = copied.search(line)
+    if m:
+        done += 1
+        print(f"  done [{done}/{total}] {m.group(1)}", flush=True)
+        continue
+    if " INFO " in line or "INFO  :" in line:
+        continue                      # other chatty -v lines
+    print(stats.sub(lambda x: f"NOTICE: [{done}/{total}]  ", line), flush=True)
+'
+
+rc_counted() {   # src dst label  (download into a local folder, with file counter)
+    local list total have
+    list=$("$RCLONE" lsf -R --files-only --format sp "$1" "${EXCLUDES[@]}" 2>/dev/null) || list=""
+    total=$(printf '%s' "$list" | grep -c . || true)
+    # files already here with the right size (a resumed restore skips them)
+    have=$(printf '%s\n' "$list" | python3 -c '
+import os, sys
+dst = sys.argv[1]; n = 0
+for line in sys.stdin:
+    size, _, path = line.rstrip("\n").partition(";")
+    p = os.path.join(dst, path)
+    if path and os.path.isfile(p) and str(os.path.getsize(p)) == size:
+        n += 1
+print(n)' "$2")
+    log "Restoring ${3:-files} ($total file(s), $have already here)"
+    "$RCLONE" copy "$1" "$2" "${RCLONE_FLAGS[@]}" "${EXCLUDES[@]}" -v 2>&1 \
+        | python3 -u -c "$COUNT_PY" "$total" "$have" "$2" | tee -a "$LOG"
+}
 
 restart_comfyui() {
     if supervisorctl status comfyui >/dev/null 2>&1; then
@@ -235,8 +272,8 @@ restore_dir() {   # remote-subdir local-dir  (fails loudly; verifies size)
     local st r l
     mkdir -p "$2"
     st=$(remote_state "$REMOTE/$1") || exit 1
-    if [ "$st" = empty ]; then log "  (nothing in R2 for $1)"; return 0; fi
-    rc copy "$REMOTE/$1" "$2"
+    if [ "$st" = empty ]; then log "Restoring $1 (nothing in R2)"; return 0; fi
+    rc_counted "$REMOTE/$1" "$2" "$1"
     r=$(bytes_of "$REMOTE/$1") || exit 1
     l=$(bytes_of "$2") || exit 1
     if [ "$l" -lt "$r" ]; then
@@ -269,11 +306,9 @@ cmd_restore() {   # [jupyter | --skip-jupyter]
     [ "$mode" = "--skip-jupyter" ] || restore_jupyter
     # Small things first (workflows, inputs, nodes); the big models come last.
     for d in user input custom_nodes models; do
-        log "Restoring $d"
         restore_dir "$d" "$COMFY/$d"
     done
     if [ "$RESTORE_OUTPUT" = "1" ]; then
-        log "Restoring output"
         restore_dir output "$COMFY/output"
     fi
     install_node_requirements
@@ -283,7 +318,6 @@ cmd_restore() {   # [jupyter | --skip-jupyter]
 }
 
 restore_jupyter() {
-    log "Restoring Jupyter settings"
     restore_dir jupyter "$WORKSPACE/.jupyter"
     # Restart JupyterLab to load them - only during instance setup. A restore started from the
     # menu/terminal runs *inside* JupyterLab, and restarting it would kill the restore.
