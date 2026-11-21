@@ -674,7 +674,7 @@ def show():
                 kids.append(W.HTML(f"<b style='font-size:1.05em'>{html.escape(top)}/</b>"))
                 last = top
             cb = W.Checkbox(value=False, indent=False, layout=W.Layout(width="auto"),
-                            description=f"{rel}   ({human(n)})")
+                            description=f"{Path(*rel.parts[1:]) if len(rel.parts) > 1 else rel}   ({human(n)})")
             cb.observe(x_update_sum, "value")
             xrows.append((cb, p, n))
             kids.append(cb)
