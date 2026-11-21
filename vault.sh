@@ -8,6 +8,7 @@
 #   vault status    show local vs R2 sizes and last backup time
 #   vault trash     list files that backups moved to R2 trash
 #   vault undelete <date> [folder]   put trash back into the vault
+#   vault empty-trash <date>|all --yes   permanently delete trash
 #   vault shutdown stop|destroy [--no-backup]   back up, then stop or destroy this instance
 #
 # Saved in R2 (bucket $R2_BUCKET):
@@ -34,7 +35,8 @@ KEEP_DIRS="output"                             # backed up only, never deleted i
 RESTORE_OUTPUT="${RESTORE_OUTPUT:-0}"          # set to 1 to also restore outputs
 
 EXCLUDES=(--exclude "**/__pycache__/**" --exclude "**/.cache/**" --exclude "**/.ipynb_checkpoints/**"
-          --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete")
+          --exclude "*.part" --exclude "*.aria2" --exclude "*.tmp" --exclude "*.incomplete"
+          --exclude "**/__manager/cache/**" --exclude "*.partial")
 # --timeout/--contimeout: a silent (hung) connection is retried after 60 s instead of rclone's default 5 min
 RCLONE_FLAGS=(--fast-list --transfers 16 --checkers 32 --s3-chunk-size 64M --s3-upload-concurrency 8
               --timeout 60s --contimeout 20s --multi-thread-streams 8 --multi-thread-cutoff 256M
@@ -443,6 +445,19 @@ cmd_trash() {   # list what is in R2 trash
     done
 }
 
+cmd_empty_trash() {   # <date>|all  --yes   (permanently deletes from R2 trash)
+    ensure_rclone; load_env; take_lock
+    local t="${1:-}" yes="${2:-}" st what
+    [ -n "$t" ] || die "Usage: vault empty-trash <date>|all --yes   (see: vault trash)"
+    [ "$yes" = "--yes" ] || die "This permanently deletes from R2 trash. Add --yes to confirm."
+    if [ "$t" = "all" ]; then what="$TRASH"; else what="$TRASH/$t"; fi
+    st=$(remote_state "$what") || exit 1
+    [ "$st" = data ] || { log "Nothing in R2 trash for '$t'."; return 0; }
+    log "Permanently deleting R2 trash: $t ($("$RCLONE" size "$what" 2>/dev/null | grep 'Total size' | sed 's/Total size: //'))"
+    "$RCLONE" purge "$what" 2>&1 | tee -a "$LOG"
+    log "Trash '$t' deleted."
+}
+
 cmd_undelete() {   # <date> [folder]  -> copy trash back into the vault (keeps the trash copy)
     ensure_rclone; load_env; take_lock
     local t="${1:-}" only="${2:-}" d st
@@ -506,8 +521,9 @@ case "$CMD" in
     trash)   cmd_trash ;;
     rclone)  shift; ensure_rclone; load_env; exec "$RCLONE" "$@" ;;
     undelete) cmd_undelete "${2:-}" "${3:-}" ;;
+    empty-trash) cmd_empty_trash "${2:-}" "${3:-}" ;;
     restore) cmd_restore "${2:-all}" ;;
     status)  cmd_status ;;
     shutdown) cmd_shutdown "${2:-}" "${3:-}" ;;
-    *) echo "Usage: vault setup | backup [--allow-delete] | restore | status | trash | undelete <date> [folder] | shutdown stop|destroy [--no-backup] | rclone <args>  (paths: r2:$R2_BUCKET/...)"; exit 1 ;;
+    *) echo "Usage: vault setup | backup [--allow-delete] | restore | status | trash | undelete <date> [folder] | empty-trash <date>|all --yes | shutdown stop|destroy [--no-backup] | rclone <args>  (paths: r2:$R2_BUCKET/...)"; exit 1 ;;
 esac
