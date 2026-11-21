@@ -629,6 +629,21 @@ def show():
     def vault_cmd(*args):
         vlog.clear()
         in_background(args[0], vlog, run_cmd, ["vault", *args], vlog)
+    vt = W.Button(description="Show R2 trash", icon="trash-restore")
+    vtd = W.Text(placeholder="trash date, e.g. 2026-11-19_221503", layout=W.Layout(width="260px"))
+    vtf = W.Dropdown(options=["all", "models", "custom_nodes", "user", "input", "jupyter"], value="all",
+                     layout=W.Layout(width="130px"))
+    vu = W.Button(description="Put back from trash", icon="undo")
+    vt.on_click(lambda _: vault_cmd("trash"))
+
+    def on_undelete(_):
+        if not vtd.value.strip():
+            vlog.clear()
+            vlog("Click 'Show R2 trash', then copy a date into the box.")
+            return
+        args = ["undelete", vtd.value.strip()] + ([] if vtf.value == "all" else [vtf.value])
+        vault_cmd(*args)
+    vu.on_click(on_undelete)
     vb.on_click(lambda _: vault_cmd("backup"))
     vs.on_click(lambda _: vault_cmd("status"))
     vr.on_click(lambda _: vault_cmd("restore"))
@@ -679,6 +694,9 @@ def show():
     vault_tab = W.VBox([W.HBox([vb, vs, vr]),
                         W.HTML("<small>Backup saves models, nodes, workflows, input, output and Jupyter "
                                "settings to Cloudflare R2. Restore runs automatically on new instances.</small>"),
+                        W.HTML("<hr><b>R2 trash</b> &nbsp;<small>Files a backup removed from the vault are "
+                               "kept here. Put them back, then use Restore (or start a new instance).</small>"),
+                        W.HBox([vt, vtd, vtf, vu]),
                         W.HTML("<hr><b>Shut down this instance</b> &nbsp;<small>STOP keeps the disk (small storage "
                                "charge, restart later on the same machine). DESTROY ends all charges; your files "
                                "are safe in R2. Destroy only runs if the backup succeeds.</small>"),
