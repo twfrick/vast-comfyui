@@ -285,10 +285,13 @@ envval() { [ -n "\${!1:-}" ] && echo "\${!1}" || grep -m1 "^\$1=" /etc/environme
 export HF_TOKEN="\$(envval HF_TOKEN)"
 export CIVITAI_TOKEN="\$(envval CIVITAI_TOKEN)"
 export CIVITAI_API_KEY="\${CIVITAI_API_KEY:-\$CIVITAI_TOKEN}"
+# Extra ComfyUI options from the template, e.g. COMFYUI_ARGS="--reserve-vram 1"
+COMFYUI_ARGS="\$(envval COMFYUI_ARGS)"
+echo "ComfyUI extra options: \${COMFYUI_ARGS:-none}"
 cd $COMFY_DIR
 # --enable-cors-header: ComfyUI sits behind Vast's proxy, so the browser's address
 # differs from 127.0.0.1 - without this, saving workflows fails with 403 Forbidden.
-exec python main.py --listen 127.0.0.1 --port $COMFY_PORT --enable-cors-header $MANAGER_FLAGS \${COMFYUI_ARGS:-}
+exec python main.py --listen 127.0.0.1 --port $COMFY_PORT --enable-cors-header $MANAGER_FLAGS \$COMFYUI_ARGS
 EOF
 chmod +x /opt/supervisor-scripts/comfyui.sh
 
