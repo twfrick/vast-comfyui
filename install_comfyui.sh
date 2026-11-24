@@ -88,9 +88,16 @@ fi
 
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }   # ver_ge A B  ->  A >= B
 
-DRIVER_CUDA="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: *[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-GPU_CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
+# These lookups must never stop the script: an empty result just means "unknown" (-> cu128)
+SMI_OUT="$(nvidia-smi 2>&1 || true)"
+DRIVER_CUDA="$(printf '%s\n' "$SMI_OUT" | sed -nE 's/.*CUDA Version: *([0-9]+\.[0-9]+).*/\1/p' | head -1 || true)"
+GPU_CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ' || true)"
+[[ "$GPU_CC" =~ ^[0-9]+\.[0-9]+$ ]] || GPU_CC=""
 echo "Host driver supports CUDA ${DRIVER_CUDA:-unknown} | GPU compute capability ${GPU_CC:-unknown}"
+if [ -z "$DRIVER_CUDA" ]; then
+    echo "WARNING: could not read the CUDA version from nvidia-smi. Its output was:"
+    printf '%s\n' "$SMI_OUT" | head -12
+fi
 
 WANT="${TORCH_CUDA:-cu128}"
 case "$WANT" in
