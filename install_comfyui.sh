@@ -40,6 +40,16 @@ else
     echo "Using pip"
 fi
 
+# ComfyUI-Vault Docker image? (ghcr.io/twfrick/vast-comfyui) - it has ComfyUI, requirements,
+# default nodes and SageAttention 2 pre-installed, so most steps below finish in seconds.
+IMAGE_DIR="/opt/comfyui-image"
+IN_IMAGE=0
+if [ -f "$IMAGE_DIR/IMAGE_INFO" ] && [ -d "$IMAGE_DIR/ComfyUI/.git" ]; then
+    IN_IMAGE=1
+    echo "ComfyUI-Vault image detected:"
+    sed 's/^/    /' "$IMAGE_DIR/IMAGE_INFO"
+fi
+
 # -----------------------------------------------------------------------------
 step "2/6 System packages"
 PKGS=""
@@ -58,19 +68,30 @@ fi
 
 # -----------------------------------------------------------------------------
 step "3/6 ComfyUI source"
+# get_comfy <dest>: copy from the image (seconds) or clone from GitHub
+get_comfy() {
+    if [ "$IN_IMAGE" = "1" ]; then
+        echo "Copying ComfyUI from the image"
+        cp -a "$IMAGE_DIR/ComfyUI" "$1"
+    else
+        git clone https://github.com/comfyanonymous/ComfyUI.git "$1"
+    fi
+}
 if [ -d "$COMFY_DIR/.git" ]; then
     echo "ComfyUI already installed - updating"
     git -C "$COMFY_DIR" pull --ff-only || echo "WARNING: update failed, keeping current version"
 elif [ -d "$COMFY_DIR" ] && [ -n "$(ls -A "$COMFY_DIR" 2>/dev/null)" ]; then
     # Folder already has files (e.g. a model downloaded from the menu before ComfyUI was installed):
-    # clone next to it and merge in without overwriting anything that is already there.
+    # get a fresh copy next to it and merge it in without overwriting anything that is already there.
     echo "ComfyUI folder already has files - merging a fresh copy in"
     rm -rf "$COMFY_DIR.clone"
-    git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR.clone"
+    get_comfy "$COMFY_DIR.clone"
     cp -an "$COMFY_DIR.clone/." "$COMFY_DIR/"
     rm -rf "$COMFY_DIR.clone"
+    [ "$IN_IMAGE" = "1" ] && { git -C "$COMFY_DIR" pull --ff-only || echo "WARNING: update failed, keeping the image's version"; }
 else
-    git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
+    get_comfy "$COMFY_DIR"
+    [ "$IN_IMAGE" = "1" ] && { git -C "$COMFY_DIR" pull --ff-only || echo "WARNING: update failed, keeping the image's version"; }
 fi
 git -C "$COMFY_DIR" log -1 --format="ComfyUI version: %h (%cd)" --date=short
 
@@ -159,14 +180,51 @@ for p in ("torch", "torchvision", "torchaudio"):
 EOF
 echo "Locked: $(tr '\n' ' ' < "$CONSTRAINTS")"
 
-# Optional: SageAttention (template setting SAGEATTENTION=1). Faster attention for nodes that use it
-# (KJNodes "Patch Sage Attention", SeedVR2, WAN video, ...). Off by default.
-if [ "${SAGEATTENTION:-0}" = "1" ]; then
-    echo "Installing SageAttention..."
-    if "${PIP[@]}" -c "$CONSTRAINTS" sageattention && "$PY" -c "import sageattention" 2>/dev/null; then
-        echo "SageAttention installed"
+# SageAttention (faster attention for KJNodes "Patch Sage Attention", MiniMax/WAN video, SeedVR2, ...)
+# Template setting SAGEATTENTION:
+#   1 = make sure SageAttention 2 works on this GPU (default with the ComfyUI-Vault image):
+#       keeps the image's copy if it works, otherwise compiles it for this GPU (a few minutes)
+#   0 = leave it alone (default with the plain vastai/pytorch image)
+SAGE_DEFAULT=0; [ "$IN_IMAGE" = "1" ] && SAGE_DEFAULT=1
+# Prints "ok <version>" if SageAttention runs a real attention call on this GPU, else "bad <reason>"
+sage_check() {
+"$PY" - <<'EOF' 2>/dev/null || echo "bad not-installed-or-broken"
+import importlib.metadata as m
+import torch
+v = m.version("sageattention")
+from sageattention import sageattn
+q = torch.randn(1, 2, 128, 64, dtype=torch.float16, device="cuda")
+out = sageattn(q, q, q, tensor_layout="HND", is_causal=False)
+torch.cuda.synchronize()
+print("ok" if out.shape == q.shape else "bad wrong-output", v)
+EOF
+}
+sage_v2() { [ "${1%%.*}" -ge 2 ] 2>/dev/null; }
+if [ "${SAGEATTENTION:-$SAGE_DEFAULT}" = "1" ]; then
+    read -r SAGE_STATE SAGE_VER < <(sage_check | tail -1) || true
+    if [ "${SAGE_STATE:-}" = "ok" ] && sage_v2 "${SAGE_VER:-0}"; then
+        echo "SageAttention $SAGE_VER works on this GPU"
     else
-        echo "WARNING: SageAttention install failed - ComfyUI still works, just without it"
+        echo "SageAttention 2 not usable here (${SAGE_STATE:-bad} ${SAGE_VER:-}) - compiling it for this GPU (a few minutes)..."
+        CC="$("$PY" -c "import torch; a,b=torch.cuda.get_device_capability(0); print(f'{a}.{b}')" 2>/dev/null || true)"
+        SAGE_TMP="$(mktemp -d)"
+        if [ -n "$CC" ] && [ -x /usr/local/cuda/bin/nvcc ] \
+           && "${PIP[@]}" ninja packaging wheel setuptools >/dev/null \
+           && git clone --depth 1 https://github.com/thu-ml/SageAttention.git "$SAGE_TMP/sage" \
+           && (cd "$SAGE_TMP/sage" && CUDA_HOME=/usr/local/cuda PATH="/usr/local/cuda/bin:$PATH" \
+                 TORCH_CUDA_ARCH_LIST="$CC" MAX_JOBS="$(nproc)" EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" \
+                 "$PY" -m pip install --no-build-isolation --no-deps -c "$CONSTRAINTS" .); then
+            read -r SAGE_STATE SAGE_VER < <(sage_check | tail -1) || true
+        else
+            SAGE_STATE=bad
+        fi
+        rm -rf "$SAGE_TMP"
+        if [ "${SAGE_STATE:-}" = "ok" ]; then
+            echo "SageAttention $SAGE_VER compiled and working"
+        else
+            echo "WARNING: SageAttention 2 could not be built - installing version 1 (works with most nodes)"
+            "${PIP[@]}" -c "$CONSTRAINTS" "sageattention==1.0.6" || echo "WARNING: SageAttention install failed - ComfyUI still works without it"
+        fi
     fi
 fi
 
