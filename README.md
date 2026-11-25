@@ -29,6 +29,8 @@ is reachable at the same fixed addresses. When you stop working, it backs up and
 | `watcher.py` | Idle watcher + automatic backups. |
 | `statuspage.py` | The status page (setup progress, restore progress, idle countdown, logs). |
 | `vault_menu.py` + `ComfyUI-Menu.ipynb` | The JupyterLab control panel. |
+| `docker/Dockerfile` | The optional ComfyUI-Vault image (everything pre-installed, see "Docker image" below). |
+| `.github/workflows/build-image.yml` | GitHub Actions job that builds the image and pushes it to `ghcr.io/<user>/vast-comfyui`. |
 
 ## Setup order on a new instance
 
@@ -98,14 +100,15 @@ Optional settings:
 | `MANAGER_UI` | `new` | `legacy` = old ComfyUI-Manager window (breaks ComfyUI's "install missing nodes") |
 | `COMFYUI_ARGS` | *(none)* | Extra ComfyUI start options, e.g. `--reserve-vram 1` (keep 1 GB of VRAM free). Use quotes if there are spaces |
 | `TORCH_CUDA` | `cu128` | PyTorch build. `cu128` works on every host with Max CUDA ≥ 12.8. `cu130` needs Max CUDA ≥ 13.0 (falls back to cu128 on older hosts). `auto` = cu130 on Blackwell GPUs (RTX 50xx / RTX PRO) when the driver allows it, otherwise cu128 |
-| `SAGEATTENTION` | `0` | `1` = install SageAttention (faster attention for KJNodes "Patch Sage Attention", SeedVR2, WAN video). Adds ~30 s to setup |
+| `SAGEATTENTION` | `1` with the image, `0` without | `1` = make sure SageAttention 2 works on this GPU: keeps the image's copy, or compiles it for this GPU (a few minutes) if the GPU or PyTorch build is not covered. `0` = leave it alone |
 | `VAULT_MAX_DELETE_FILES` / `VAULT_MAX_DELETE_GB` | `25` / `5` | Safety limit for removing files from R2 in one backup |
 | `RESTORE_OUTPUT` | `0` | `1` = also restore the output folder |
 
 ### 5. Vast.ai template
 Start from Vast's **PyTorch** template and set:
 
-- **Image:** `vastai/pytorch`, tag `cuda-12.8.1-auto`
+- **Image:** `ghcr.io/<user>/vast-comfyui:latest` (the pre-built image, see "Docker image" below),
+  or the plain `vastai/pytorch` with tag `cuda-12.8.1-auto` (everything gets installed at startup instead)
 - **Launch mode:** Jupyter. "Jupyter direct HTTPS" is optional (needs Vast's certificate in the browser).
 - **Disk:** 200 GB (more if your model library grows; it can't be changed after renting)
 - **Ports:** `8188`, `1111`
@@ -131,6 +134,28 @@ Start from Vast's **PyTorch** template and set:
 If you fork this repo, change `REPO` at the top of `provision.sh` (or set `VAULT_REPO`).
 
 ---
+
+## Docker image (faster setup)
+
+The image `ghcr.io/<user>/vast-comfyui:latest` is `vastai/pytorch:cuda-12.8.1-auto` plus everything
+the setup would otherwise install on each instance: system packages, rclone, cloudflared, JupyterLab,
+ComfyUI with all its requirements, the default nodes, and **SageAttention 2** compiled for
+RTX 30xx/A6000 (8.6), RTX 40xx/6000 Ada (8.9) and RTX 50xx/RTX PRO Blackwell (12.0).
+Your models, nodes, workflows and settings still come from R2. No tokens are in the image.
+
+The same scripts work with both images: `install_comfyui.sh` sees `/opt/comfyui-image/IMAGE_INFO`
+and copies ComfyUI from the image instead of downloading it, then updates it with `git pull`.
+
+**Building it** (GitHub does this for you, no Docker needed on your PC):
+- Runs automatically when `docker/` or the workflow file changes, and every Monday (new ComfyUI
+  and base image). By hand: repo -> **Actions** -> **Build Docker image** -> **Run workflow**.
+- Takes roughly 40-90 minutes, mostly compiling SageAttention. Result: repo -> **Packages**.
+- **Once, after the first build:** GitHub profile -> **Packages** -> `vast-comfyui` ->
+  **Package settings** -> **Change visibility** -> **Public**, so Vast can download it without a login.
+
+**Start-up time:** the first start on a host that has never had it downloads ~12-14 GB. Hosts
+that already have the matching `vastai/pytorch` layers only download the extra few GB. After the
+download, setup skips the installs, so the remaining time is mostly the model restore from R2.
 
 ## Daily use
 
