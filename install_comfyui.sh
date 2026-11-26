@@ -111,7 +111,7 @@ ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }   
 
 # These lookups must never stop the script: an empty result just means "unknown" (-> cu128)
 SMI_OUT="$(nvidia-smi 2>&1 || true)"
-DRIVER_CUDA="$(printf '%s\n' "$SMI_OUT" | sed -nE 's/.*CUDA Version: *([0-9]+\.[0-9]+).*/\1/p' | head -1 || true)"
+DRIVER_CUDA="$(printf '%s\n' "$SMI_OUT" | sed -nE 's/.*CUDA (UMD )?Version: *([0-9]+\.[0-9]+).*/\2/p' | head -1 || true)"
 GPU_CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ' || true)"
 [[ "$GPU_CC" =~ ^[0-9]+\.[0-9]+$ ]] || GPU_CC=""
 echo "Host driver supports CUDA ${DRIVER_CUDA:-unknown} | GPU compute capability ${GPU_CC:-unknown}"
